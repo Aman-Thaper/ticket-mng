@@ -1,7 +1,8 @@
 /**
  * Fills the dev database with realistic volume so slow queries show up:
- *   50k users, 500 venues (~430k physical seats), 200k events, and seat inventory
- *   (~860k rows) for the next 1,000 upcoming published events. Takes about 30 s.
+ *   50k users, 500 venues (~430k physical seats), 200k events, seat inventory (~860k rows)
+ *   for the next 1,000 upcoming published events, and ~100k confirmed bookings covering a
+ *   third of those seats. Takes about 40 s.
  *
  * WIPES ALL DATA FIRST. Run it with `npm run seed`. Scale with SEED_USERS, SEED_VENUES and
  * SEED_EVENTS_PER_VENUE.
@@ -203,11 +204,8 @@ try {
   // Inventory only for the soonest upcoming shows. Giving every event its seats would mean
   // roughly 140M rows.
   const inv = await sql`
-    INSERT INTO event_seats (event_id, venue_seat_id, price_cents, status)
-    SELECT e.id,
-           vs.id,
-           greatest(1500, 12000 - sec.sort_order * 2500),
-           CASE WHEN random() < 0.35 THEN 'booked' ELSE 'available' END::seat_status
+    INSERT INTO event_seats (event_id, venue_seat_id, price_cents)
+    SELECT e.id, vs.id, greatest(1500, 12000 - sec.sort_order * 2500)
     FROM (
       SELECT id, venue_id FROM events
       WHERE status = 'published' AND starts_at > now()
@@ -220,6 +218,50 @@ try {
   log(
     `event_seats: ${inv.numAffectedRows} (for the next ${EVENTS_WITH_INVENTORY} upcoming published events)`,
   );
+
+  // ---------------------------------------------------------------- sales history
+  // About a third of those seats are already sold. Every sold seat belongs to a real
+  // confirmed booking (the schema enforces that a non-available seat has a booking), so
+  // group the sold seats into bookings of up to 3 seats, each for a random attendee.
+  // All set-based SQL: a few statements instead of 100k round trips.
+  await sql`
+    CREATE TEMP TABLE seed_orders AS
+    SELECT gen_random_uuid() AS booking_id, event_id, sum(price_cents)::int AS total, array_agg(id) AS seat_ids
+    FROM (
+      SELECT id, event_id, price_cents,
+             (row_number() OVER (PARTITION BY event_id ORDER BY random()) - 1) / 3 AS grp
+      FROM event_seats
+      WHERE random() < 0.35
+    ) sold
+    GROUP BY event_id, grp
+  `.execute(db);
+  const orders = await sql`
+    WITH buyers AS (SELECT array_agg(id) AS ids FROM users WHERE role = 'attendee')
+    INSERT INTO bookings (id, user_id, event_id, status, total_cents, currency, expires_at, confirmed_at, created_at)
+    SELECT o.booking_id,
+           buyers.ids[1 + floor(random() * array_length(buyers.ids, 1))::int],
+           o.event_id, 'confirmed', o.total, 'USD', now(), now(), now() - random() * interval '30 days'
+    FROM seed_orders o, buyers
+  `.execute(db);
+  await sql`
+    INSERT INTO booking_items (booking_id, event_seat_id, price_cents)
+    SELECT o.booking_id, s.id, es.price_cents
+    FROM seed_orders o
+    CROSS JOIN unnest(o.seat_ids) AS s(id)
+    JOIN event_seats es ON es.id = s.id
+  `.execute(db);
+  const sold = await sql`
+    UPDATE event_seats es SET status = 'booked', booking_id = s.booking_id, version = 1
+    FROM (SELECT booking_id, unnest(seat_ids) AS seat_id FROM seed_orders) s
+    WHERE es.id = s.seat_id
+  `.execute(db);
+  log(`bookings: ${orders.numAffectedRows} confirmed, covering ${sold.numAffectedRows} sold seats`);
+
+  // Some far-off shows aren't on sale yet: tickets go on sale 30 days before.
+  await sql`
+    UPDATE events SET sales_start_at = starts_at - interval '30 days'
+    WHERE starts_at > now() + interval '60 days' AND random() < 0.3
+  `.execute(db);
 
   await sql`ANALYZE`.execute(db); // refresh planner statistics after a bulk load
   log('done');

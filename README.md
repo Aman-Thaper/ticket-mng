@@ -10,7 +10,7 @@ An event ticketing backend built phase by phase to practise the hard parts: conc
 | ----- | --------------------------------------------------------------------------------------------------- | ------ |
 | 1     | Core API + schema: users, venues, seat layouts, events, seat inventory, search, pagination, Swagger | ✅     |
 | 2     | Auth: argon2, access + refresh tokens, password reset, roles/ownership                              | ✅     |
-| 3     | Seat holds (10 min) + booking, race-condition test (200 concurrent requests), locking               |        |
+| 3     | Seat holds (10 min) + booking, race-condition test (200 concurrent requests), locking               | ✅     |
 | 4     | Workers (BullMQ): QR ticket emails, poster uploads to MinIO, scheduled jobs, DLQ                    |        |
 | 5     | Payments + webhooks, idempotency keys, booking state machine                                        |        |
 | 6     | Flash sale: k6, Redis cache, rate limiting, WebSockets + pub/sub, 3 instances behind Nginx          |        |
@@ -44,6 +44,7 @@ npm run dev         # http://localhost:3000/docs
 | `npm run test:unit`                | unit tests only, no DB needed                                                |
 | `npm run migrate` / `migrate:down` | apply all migrations / roll back the last one                                |
 | `npm run seed`                     | **wipes** the dev DB and loads realistic volume                              |
+| `npm run race`                     | 200 concurrent holds on one seat, per locking strategy (see below)           |
 | `npm run typecheck`                | `tsc --noEmit`                                                               |
 
 ## Layout
@@ -88,6 +89,10 @@ All routes are under `/api/v1`. Interactive docs are at `/docs`, and the raw spe
 | PATCH      | `/events/:id`                              | partial update and status transitions                                                                                   |
 | DELETE     | `/events/:id`                              | drafts only (others must be cancelled)                                                                                  |
 | GET        | `/events/:id/seats`                        | seat map grouped by section, with x/y, price and status                                                                 |
+| POST       | `/events/:id/bookings`                     | hold seats for 10 min (pending booking); 409 if taken                                                                   |
+| GET        | `/bookings`, `/bookings/:id`               | your bookings (cursor pagination) / one booking                                                                         |
+| POST       | `/bookings/:id/confirm`                    | stand-in for payment until Phase 5                                                                                      |
+| POST       | `/bookings/:id/cancel`                     | release a pending hold                                                                                                  |
 | GET        | `/health`                                  | DB ping                                                                                                                 |
 
 **Errors** always have the shape `{ "error": { "code", "message", "details?" } }`.
@@ -110,6 +115,25 @@ These are worth being able to explain in an interview.
 - **Bulk inserts with `unnest(arrays)`.** Creating a 50k-seat venue or event is a single `INSERT … SELECT`, with no per-row round trips and no bind-parameter limit.
 - **`SELECT … FOR UPDATE` in `PATCH /events/:id`** keeps two concurrent status changes from both reading `draft` and acting on stale state. This is a small preview of Phase 3.
 - **Response DTOs everywhere.** Rows are never returned directly, so the `password_hash` column arriving in Phase 2 can't leak.
+
+## How double booking is prevented
+
+Seat rows are the single source of truth. Taking a seat means setting `event_seats.booking_id` and `status = 'held'` inside a transaction, and a check constraint enforces _available ⇔ no booking_. `npm run race` sends 200 simultaneous HTTP requests for the same seat under each strategy:
+
+| Strategy           | 201s | Owners in DB | Reached Postgres | How it works                                                                    |
+| ------------------ | ---- | ------------ | ---------------- | ------------------------------------------------------------------------------- |
+| naive              | 11   | **11** ✗     | 200              | read, check, write with no locks: every reader of "available" writes            |
+| optimistic         | 1    | 1            | 200              | `UPDATE … WHERE version = <read version>`; losers match 0 rows                  |
+| serializable       | 1    | 1            | 200              | SERIALIZABLE transaction; Postgres aborts conflicts (40001), retries see "held" |
+| pessimistic        | 1    | 1            | 200              | `SELECT … FOR UPDATE SKIP LOCKED`; losers skip the locked row and fail fast     |
+| pessimistic + gate | 1    | 1            | **30**           | Redis `SET NX` claim first; 170 losers never touch Postgres                     |
+
+Pessimistic + gate is the default. Supporting pieces:
+
+- **Holds are pending bookings** with `expires_at`. A lapsed hold counts as free immediately (lazy expiry, judged by the database clock), so correctness never depends on a background job.
+- **One lock order everywhere**: seat rows (ascending id), then booking rows, so confirming, cancelling, expiring and holding can't deadlock one another.
+- **One active hold per user per event**: a partial unique index. It stops double-clicks and seat hoarding, and makes the per-user ticket limit race-free.
+- **The Redis claim gate is a load shield, not a lock**: TTL locks in Redis can't guarantee mutual exclusion, so Postgres still decides who gets the seat.
 
 ## Exercise: watch an index work
 

@@ -8,16 +8,31 @@ import {
   validatorCompiler,
   type ZodTypeProvider,
 } from 'fastify-type-provider-zod';
+import { config } from './config.js';
 import { errorHandler } from './lib/errors.js';
 import { transformObject } from './lib/openapi.js';
 import { authRoutes } from './modules/auth/routes.js';
+import { bookingRoutes } from './modules/bookings/routes.js';
+import type { BookingOptions } from './modules/bookings/service.js';
 import { healthRoutes } from './modules/health/routes.js';
 import { userRoutes } from './modules/users/routes.js';
 import { venueRoutes } from './modules/venues/routes.js';
 import { eventRoutes } from './modules/events/routes.js';
 
-export async function buildApp(opts: FastifyServerOptions = {}) {
+export interface AppOverrides {
+  /** Lets scripts (e.g. the race test) run the booking flow with a different strategy. */
+  booking?: Partial<BookingOptions>;
+}
+
+export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOverrides = {}) {
   const app = Fastify(opts).withTypeProvider<ZodTypeProvider>();
+
+  app.decorate('bookingOptions', {
+    strategy: config.HOLD_STRATEGY,
+    claimGate: config.CLAIM_GATE_ENABLED,
+    holdTtlSeconds: config.HOLD_TTL_SECONDS,
+    ...overrides.booking,
+  });
 
   // Zod schemas handle request validation, response serialization and the OpenAPI spec,
   // so there's one source of truth for all three.
@@ -40,6 +55,7 @@ export async function buildApp(opts: FastifyServerOptions = {}) {
       tags: [
         { name: 'auth', description: 'Signup, login, token refresh, sessions and passwords' },
         { name: 'events', description: 'Events, search and seat maps' },
+        { name: 'bookings', description: 'Seat holds and bookings' },
         { name: 'venues', description: 'Venues and their seat layouts' },
         { name: 'users', description: 'Profiles and roles' },
         { name: 'ops', description: 'Operational endpoints' },
@@ -69,6 +85,7 @@ export async function buildApp(opts: FastifyServerOptions = {}) {
       await api.register(userRoutes);
       await api.register(venueRoutes);
       await api.register(eventRoutes);
+      await api.register(bookingRoutes);
     },
     { prefix: '/api/v1' },
   );

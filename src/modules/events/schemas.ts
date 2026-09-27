@@ -20,6 +20,8 @@ export const EventDto = z
     status: z.enum(EVENT_STATUSES),
     startsAt: Timestamp,
     endsAt: Timestamp,
+    salesStartAt: Timestamp.nullable().describe('When tickets go on sale; null = as soon as published'),
+    maxTicketsPerUser: z.int(),
     currency: z.string(),
     createdAt: Timestamp,
     updatedAt: Timestamp,
@@ -34,6 +36,11 @@ export const EventDetailDto = EventDto.extend({
 const endsAfterStart = (b: { startsAt?: string; endsAt?: string }) =>
   !b.startsAt || !b.endsAt || new Date(b.endsAt) > new Date(b.startsAt);
 
+const salesBeforeStart = (b: { startsAt?: string; salesStartAt?: string | null }) =>
+  !b.startsAt || !b.salesStartAt || new Date(b.salesStartAt) < new Date(b.startsAt);
+
+const MaxTicketsPerUser = z.int().min(1).max(50);
+
 export const CreateEventBody = z
   .object({
     venueId: z.uuid(),
@@ -42,6 +49,10 @@ export const CreateEventBody = z
     category: z.enum(EVENT_CATEGORIES),
     startsAt: TimestampInput,
     endsAt: TimestampInput,
+    salesStartAt: TimestampInput.optional().describe(
+      'Omit to put tickets on sale as soon as the event is published',
+    ),
+    maxTicketsPerUser: MaxTicketsPerUser.default(10),
     currency: z
       .string()
       .regex(/^[A-Z]{3}$/, 'ISO 4217 code, e.g. "USD"')
@@ -52,6 +63,7 @@ export const CreateEventBody = z
       .describe('One price per venue section. Every section must be priced.'),
   })
   .refine(endsAfterStart, { path: ['endsAt'], message: 'endsAt must be after startsAt' })
+  .refine(salesBeforeStart, { path: ['salesStartAt'], message: 'salesStartAt must be before startsAt' })
   .refine((b) => new Date(b.startsAt) > new Date(), {
     path: ['startsAt'],
     message: 'startsAt must be in the future',
@@ -64,6 +76,8 @@ export const UpdateEventBody = z
     category: z.enum(EVENT_CATEGORIES),
     startsAt: TimestampInput,
     endsAt: TimestampInput,
+    salesStartAt: TimestampInput.nullable(),
+    maxTicketsPerUser: MaxTicketsPerUser,
     status: z.enum(EVENT_STATUSES),
   })
   .partial()
@@ -107,6 +121,7 @@ export const SeatMapResponse = z
             y: z.int(),
             priceCents: z.int(),
             status: z.enum(SEAT_STATUSES),
+            version: z.int().describe('Bumped on every change; live updates with a lower version are stale'),
           }),
         ),
       }),

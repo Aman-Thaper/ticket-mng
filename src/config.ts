@@ -44,6 +44,17 @@ const schema = z.object({
   /** Must be true in production (HTTPS). Browsers drop Secure cookies on plain http://localhost. */
   COOKIE_SECURE: bool.default(false),
 
+  // ---- booking
+  /** How long selected seats stay reserved while the buyer pays. */
+  HOLD_TTL_SECONDS: z.coerce.number().int().min(30).max(3600).default(600),
+  /**
+   * How concurrent holds on the same seat are resolved (see src/modules/bookings/strategies.ts).
+   * 'naive' is deliberately broken, kept to demonstrate the race, and is refused in production.
+   */
+  HOLD_STRATEGY: z.enum(['pessimistic', 'optimistic', 'serializable', 'naive']).default('pessimistic'),
+  /** Redis fast-path that turns away concurrent attempts on the same seat before they reach Postgres. */
+  CLAIM_GATE_ENABLED: bool.default(true),
+
   // ---- email
   SMTP_URL: z.string().default('smtp://localhost:1025'),
   MAIL_FROM: z.string().default('Ticket MNG <no-reply@ticket-mng.local>'),
@@ -54,6 +65,11 @@ const schema = z.object({
 const parsed = schema.safeParse(process.env);
 if (!parsed.success) {
   console.error('Invalid environment configuration:\n' + z.prettifyError(parsed.error));
+  process.exit(1);
+}
+
+if (parsed.data.NODE_ENV === 'production' && parsed.data.HOLD_STRATEGY === 'naive') {
+  console.error('HOLD_STRATEGY=naive double-books seats by design and is not allowed in production');
   process.exit(1);
 }
 

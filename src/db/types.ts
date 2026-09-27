@@ -14,6 +14,9 @@ export type EventCategory = (typeof EVENT_CATEGORIES)[number];
 export const SEAT_STATUSES = ['available', 'held', 'booked'] as const;
 export type SeatStatus = (typeof SEAT_STATUSES)[number];
 
+export const BOOKING_STATUSES = ['pending', 'confirmed', 'expired', 'cancelled', 'refunded'] as const;
+export type BookingStatus = (typeof BOOKING_STATUSES)[number];
+
 type CreatedAt = ColumnType<Date, never, never>;
 type UpdatedAt = ColumnType<Date, never, never>; // maintained by a trigger
 
@@ -95,6 +98,8 @@ export interface EventsTable {
   status: Generated<EventStatus>;
   startsAt: Date;
   endsAt: Date;
+  salesStartAt: Date | null;
+  maxTicketsPerUser: Generated<number>;
   currency: Generated<string>;
   createdAt: CreatedAt;
   updatedAt: UpdatedAt;
@@ -106,6 +111,30 @@ export interface EventSeatsTable {
   venueSeatId: number;
   priceCents: number;
   status: Generated<SeatStatus>;
+  bookingId: string | null;
+  version: Generated<number>;
+}
+
+export interface BookingsTable {
+  id: Generated<string>;
+  userId: string;
+  eventId: string;
+  status: Generated<BookingStatus>;
+  totalCents: number;
+  currency: string;
+  expiresAt: Date;
+  confirmedAt: Date | null;
+  expiredAt: Date | null;
+  cancelledAt: Date | null;
+  refundedAt: Date | null;
+  createdAt: CreatedAt;
+  updatedAt: UpdatedAt;
+}
+
+export interface BookingItemsTable {
+  bookingId: string;
+  eventSeatId: number;
+  priceCents: number;
 }
 
 export interface DB {
@@ -118,8 +147,11 @@ export interface DB {
   venueSeats: VenueSeatsTable;
   events: EventsTable;
   eventSeats: EventSeatsTable;
+  bookings: BookingsTable;
+  bookingItems: BookingItemsTable;
 }
 
 export type User = Selectable<UsersTable>;
 export type Venue = Selectable<VenuesTable>;
 export type Event = Selectable<EventsTable>;
+export type Booking = Selectable<BookingsTable>;

@@ -3,8 +3,9 @@ import { sql, type Kysely, type Transaction } from 'kysely';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { db } from '../../db/index.js';
 import { withTransaction } from '../../db/transaction.js';
-import type { DB, EventStatus } from '../../db/types.js';
+import type { DB, EventStatus, SeatStatus } from '../../db/types.js';
 import { AppError, conflict, forbidden, notFound, unauthorized, unprocessable } from '../../lib/errors.js';
+import { acquirableSql, cancelPendingBookingsForEvent } from '../bookings/service.js';
 import { decodeCursor, encodeCursor } from '../../lib/pagination.js';
 import { errors, IdParams } from '../../lib/schemas.js';
 import {
@@ -40,6 +41,8 @@ function selectEvents(conn: Kysely<DB>) {
       'e.status',
       'e.startsAt',
       'e.endsAt',
+      'e.salesStartAt',
+      'e.maxTicketsPerUser',
       'e.currency',
       'e.createdAt',
       'e.updatedAt',
@@ -61,6 +64,8 @@ const toEventDto = (r: EventRow): z.infer<typeof EventDto> => ({
   status: r.status,
   startsAt: r.startsAt.toISOString(),
   endsAt: r.endsAt.toISOString(),
+  salesStartAt: r.salesStartAt?.toISOString() ?? null,
+  maxTicketsPerUser: r.maxTicketsPerUser,
   currency: r.currency.trim(),
   createdAt: r.createdAt.toISOString(),
   updatedAt: r.updatedAt.toISOString(),
@@ -83,13 +88,15 @@ async function getEventDetail(id: string, viewer: AuthUser | null): Promise<z.in
   const [event, stats] = await Promise.all([
     selectEvents(db).where('e.id', '=', id).executeTakeFirst(),
     db
-      .selectFrom('eventSeats')
-      .where('eventId', '=', id)
+      .selectFrom('eventSeats as es')
+      .leftJoin('bookings as b', 'b.id', 'es.bookingId')
+      .where('es.eventId', '=', id)
       .select((eb) => [
         eb.fn.countAll<number>().as('total'),
-        eb.fn.count<number>('id').filterWhere('status', '=', 'available').as('available'),
-        eb.fn.min('priceCents').as('minCents'),
-        eb.fn.max('priceCents').as('maxCents'),
+        // Seats of lapsed holds count as available, whether or not the expiry job has run.
+        sql<number>`count(*) FILTER (WHERE ${acquirableSql})`.as('available'),
+        eb.fn.min('es.priceCents').as('minCents'),
+        eb.fn.max('es.priceCents').as('maxCents'),
       ])
       .executeTakeFirstOrThrow(),
   ]);
@@ -180,6 +187,7 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
               venueId,
               startsAt: new Date(fields.startsAt),
               endsAt: new Date(fields.endsAt),
+              salesStartAt: fields.salesStartAt ? new Date(fields.salesStartAt) : null,
             })
             .returning('id')
             .executeTakeFirstOrThrow();
@@ -247,7 +255,7 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
       if (cursor) {
         const c = decodeCursor(cursor);
         // A row-value comparison matches the (status, starts_at, id) index exactly.
-        query = query.where(sql<boolean>`(e.starts_at, e.id) > (${c.startsAt}::timestamptz, ${c.id}::uuid)`);
+        query = query.where(sql<boolean>`(e.starts_at, e.id) > (${c.at}::timestamptz, ${c.id}::uuid)`);
       }
 
       // Fetch one extra row. If it comes back, there's another page.
@@ -265,7 +273,7 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
         data: page.map(toEventDto),
         page: {
           limit,
-          nextCursor: hasMore && last ? encodeCursor({ startsAt: last.startsAt, id: last.id }) : null,
+          nextCursor: hasMore && last ? encodeCursor({ at: last.startsAt, id: last.id }) : null,
         },
       };
     },
@@ -312,7 +320,7 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
           // "draft" and apply conflicting transitions.
           const current = await trx
             .selectFrom('events')
-            .select(['status', 'organizerId', 'venueId', 'startsAt', 'endsAt'])
+            .select(['status', 'organizerId', 'venueId', 'startsAt', 'endsAt', 'salesStartAt'])
             .where('id', '=', id)
             .forUpdate()
             .executeTakeFirst();
@@ -338,17 +346,30 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
 
           const startsAt = patch.startsAt ? new Date(patch.startsAt) : current.startsAt;
           const endsAt = patch.endsAt ? new Date(patch.endsAt) : current.endsAt;
+          const salesStartAt =
+            patch.salesStartAt === undefined
+              ? current.salesStartAt
+              : patch.salesStartAt
+                ? new Date(patch.salesStartAt)
+                : null;
           if (endsAt <= startsAt) {
             throw new AppError(400, 'VALIDATION_ERROR', 'endsAt must be after startsAt');
+          }
+          if (salesStartAt && salesStartAt >= startsAt) {
+            throw new AppError(400, 'VALIDATION_ERROR', 'salesStartAt must be before startsAt');
           }
           // Moving an event in time is a schedule change: same per-venue lock as creation.
           if (patch.startsAt || patch.endsAt) await lockVenueSchedule(trx, current.venueId);
 
           await trx
             .updateTable('events')
-            .set({ ...patch, startsAt, endsAt })
+            .set({ ...patch, startsAt, endsAt, salesStartAt })
             .where('id', '=', id)
             .execute();
+
+          // Cancelling the event voids every seat hold on it. (Paid bookings are refunded by
+          // the payments flow.)
+          if (patch.status === 'cancelled') await cancelPendingBookingsForEvent(trx, id);
         });
       } catch (err) {
         if (isVenueOverlap(err)) throw venueOverlap();
@@ -422,11 +443,17 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
         .selectFrom('eventSeats as es')
         .innerJoin('venueSeats as vs', 'vs.id', 'es.venueSeatId')
         .innerJoin('venueSections as sec', 'sec.id', 'vs.sectionId')
+        .leftJoin('bookings as b', 'b.id', 'es.bookingId')
         .where('es.eventId', '=', event.id)
         .select([
           'es.id',
           'es.priceCents',
-          'es.status',
+          // A seat whose hold has lapsed is shown as available straight away, even before
+          // the expiry job has released it.
+          sql<SeatStatus>`CASE WHEN ${acquirableSql} THEN 'available'::seat_status ELSE es.status END`.as(
+            'status',
+          ),
+          'es.version',
           'vs.rowLabel',
           'vs.seatNumber',
           'vs.x',
@@ -450,6 +477,7 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
           y: r.y,
           priceCents: r.priceCents,
           status: r.status,
+          version: r.version,
         });
       }
 
