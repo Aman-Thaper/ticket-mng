@@ -23,9 +23,7 @@ export const VenueDto = z
   .meta({ id: 'Venue' });
 
 const VenueDetailDto = VenueDto.extend({
-  sections: z.array(
-    z.object({ id: z.uuid(), name: z.string(), rows: z.int(), seats: z.int() }),
-  ),
+  sections: z.array(z.object({ id: z.uuid(), name: z.string(), rows: z.int(), seats: z.int() })),
 }).meta({ id: 'VenueDetail' });
 
 const toVenueDto = (v: Venue): z.infer<typeof VenueDto> => ({
@@ -122,10 +120,7 @@ export const venueRoutes: FastifyPluginAsyncZod = async (app) => {
         return venue;
       });
 
-      return reply
-        .status(201)
-        .header('location', `/api/v1/venues/${venue.id}`)
-        .send(toVenueDto(venue));
+      return reply.status(201).header('location', `/api/v1/venues/${venue.id}`).send(toVenueDto(venue));
     },
   );
 

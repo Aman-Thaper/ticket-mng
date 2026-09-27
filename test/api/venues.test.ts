@@ -32,8 +32,14 @@ describe('venues', () => {
       method: 'POST',
       url: '/api/v1/venues',
       payload: {
-        name: 'V', address: 'a', city: 'c', country: 'US',
-        sections: [{ name: 'A', rows: 1, seatsPerRow: 1 }, { name: 'a', rows: 1, seatsPerRow: 1 }],
+        name: 'V',
+        address: 'a',
+        city: 'c',
+        country: 'US',
+        sections: [
+          { name: 'A', rows: 1, seatsPerRow: 1 },
+          { name: 'a', rows: 1, seatsPerRow: 1 },
+        ],
       },
     });
     expect(res.statusCode).toBe(400);

@@ -6,10 +6,10 @@ import type { DB } from '../../db/types.js';
 import { AppError, conflict, notFound, unprocessable } from '../../lib/errors.js';
 import { decodeCursor, encodeCursor } from '../../lib/pagination.js';
 import { errors, IdParams } from '../../lib/schemas.js';
+import type { EventDto } from './schemas.js';
 import {
   CreateEventBody,
   EventDetailDto,
-  EventDto,
   EventListResponse,
   ListEventsQuery,
   SeatMapResponse,
@@ -76,15 +76,15 @@ async function getEventDetail(id: string): Promise<z.infer<typeof EventDetailDto
   return {
     ...toEventDto(event),
     seats: { total: stats.total, available: stats.available },
-    priceRange:
-      stats.minCents === null ? null : { minCents: stats.minCents, maxCents: stats.maxCents! },
+    priceRange: stats.minCents === null ? null : { minCents: stats.minCents, maxCents: stats.maxCents },
   };
 }
 
 /** Postgres raises 23P01 when the events_no_venue_overlap exclusion constraint fires. */
 function isVenueOverlap(err: unknown) {
   return (
-    typeof err === 'object' && err !== null &&
+    typeof err === 'object' &&
+    err !== null &&
     (err as { code?: string }).code === '23P01' &&
     (err as { constraint?: string }).constraint === 'events_no_venue_overlap'
   );
@@ -272,8 +272,11 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
           if (current.status === 'cancelled') {
             throw conflict('EVENT_CANCELLED', 'Cancelled events cannot be modified');
           }
-          if (patch.status && patch.status !== current.status &&
-              !STATUS_TRANSITIONS[current.status].includes(patch.status)) {
+          if (
+            patch.status &&
+            patch.status !== current.status &&
+            !STATUS_TRANSITIONS[current.status].includes(patch.status)
+          ) {
             throw conflict(
               'INVALID_STATUS_TRANSITION',
               `Cannot change status from ${current.status} to ${patch.status}`,
@@ -308,7 +311,8 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
       schema: {
         tags: ['events'],
         summary: 'Delete a draft event',
-        description: 'Only drafts can be deleted. Published events must be cancelled instead, which keeps their history.',
+        description:
+          'Only drafts can be deleted. Published events must be cancelled instead, which keeps their history.',
         params: IdParams,
         response: { 204: z.null().describe('Deleted'), ...errors },
       },
@@ -328,7 +332,10 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
           .where('id', '=', req.params.id)
           .executeTakeFirst();
         if (!exists) throw notFound('Event');
-        throw conflict('EVENT_NOT_DRAFT', `Only draft events can be deleted (status is ${exists.status}); cancel it instead`);
+        throw conflict(
+          'EVENT_NOT_DRAFT',
+          `Only draft events can be deleted (status is ${exists.status}); cancel it instead`,
+        );
       }
       return reply.status(204).send(null);
     },

@@ -33,22 +33,33 @@ function chunks<T>(items: T[], size: number): T[][] {
 
 function title(category: EventCategory): string {
   switch (category) {
-    case 'concert': return `${faker.music.artist()} Live`;
-    case 'festival': return `${faker.location.city()} ${faker.music.genre()} Festival`;
-    case 'comedy': return `${faker.person.fullName()}: ${faker.word.adjective()} and ${faker.word.adjective()}`;
-    case 'theatre': return `${faker.book.title()}`;
-    case 'sports': return `${faker.location.city()} vs ${faker.location.city()}`;
-    default: return faker.company.catchPhrase();
+    case 'concert':
+      return `${faker.music.artist()} Live`;
+    case 'festival':
+      return `${faker.location.city()} ${faker.music.genre()} Festival`;
+    case 'comedy':
+      return `${faker.person.fullName()}: ${faker.word.adjective()} and ${faker.word.adjective()}`;
+    case 'theatre':
+      return `${faker.book.title()}`;
+    case 'sports':
+      return `${faker.location.city()} vs ${faker.location.city()}`;
+    case 'other':
+      return faker.company.catchPhrase();
   }
 }
 
 try {
-  await sql`TRUNCATE users, venues, venue_sections, venue_seats, events, event_seats RESTART IDENTITY CASCADE`.execute(db);
+  await sql`TRUNCATE users, venues, venue_sections, venue_seats, events, event_seats RESTART IDENTITY CASCADE`.execute(
+    db,
+  );
   log('truncated');
 
   // ---------------------------------------------------------------- users
   const organizerIds: string[] = [];
-  for (const batch of chunks(Array.from({ length: USERS }, (_, i) => i), BATCH)) {
+  for (const batch of chunks(
+    Array.from({ length: USERS }, (_, i) => i),
+    BATCH,
+  )) {
     const roles = batch.map((i) => (i === 0 ? 'admin' : i % 50 === 0 ? 'organizer' : 'attendee'));
     const rows = await sql<{ id: string; role: string }>`
       INSERT INTO users (email, name, role)
@@ -85,7 +96,17 @@ try {
         .values({
           name: `${faker.location.city()} ${faker.helpers.arrayElement(['Arena', 'Hall', 'Theatre', 'Stadium', 'Club', 'Amphitheatre'])}`,
           address: faker.location.streetAddress(),
-          city: faker.helpers.arrayElement(['London', 'Berlin', 'New York', 'Paris', 'Mumbai', 'Tokyo', 'Toronto', 'Sydney', faker.location.city()]),
+          city: faker.helpers.arrayElement([
+            'London',
+            'Berlin',
+            'New York',
+            'Paris',
+            'Mumbai',
+            'Tokyo',
+            'Toronto',
+            'Sydney',
+            faker.location.city(),
+          ]),
           country: faker.location.countryCode('alpha-2'),
           capacity: seats.length,
         })
@@ -117,13 +138,22 @@ try {
   // ---------------------------------------------------------------- events
   // Each venue gets a back-to-back schedule running from a year ago to about two years out.
   // Walking time forward per venue guarantees the no-overlap constraint is never violated.
-  type EventRow = { organizerId: string; venueId: string; title: string; description: string; category: EventCategory; status: EventStatus; startsAt: Date; endsAt: Date };
+  type EventRow = {
+    organizerId: string;
+    venueId: string;
+    title: string;
+    description: string;
+    category: EventCategory;
+    status: EventStatus;
+    startsAt: Date;
+    endsAt: Date;
+  };
   const events: EventRow[] = [];
   const DAY = 86_400_000;
   for (const venueId of venueIds) {
     let t = Date.now() - 365 * DAY + faker.number.int({ min: 0, max: 2 * DAY });
     for (let i = 0; i < EVENTS_PER_VENUE; i++) {
-      t += faker.number.int({ min: 1, max: 4 }) * DAY / 2;
+      t += (faker.number.int({ min: 1, max: 4 }) * DAY) / 2;
       const start = new Date(Math.round(t / 1_800_000) * 1_800_000); // snap to :00 / :30
       const hours = faker.number.int({ min: 2, max: 5 });
       const category = faker.helpers.weightedArrayElement(
@@ -182,7 +212,9 @@ try {
     JOIN venue_sections sec ON sec.venue_id = e.venue_id
     JOIN venue_seats vs ON vs.section_id = sec.id
   `.execute(db);
-  log(`event_seats: ${inv.numAffectedRows} (for the next ${EVENTS_WITH_INVENTORY} upcoming published events)`);
+  log(
+    `event_seats: ${inv.numAffectedRows} (for the next ${EVENTS_WITH_INVENTORY} upcoming published events)`,
+  );
 
   await sql`ANALYZE`.execute(db); // refresh planner statistics after a bulk load
   log('done');

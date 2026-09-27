@@ -1,8 +1,5 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
-import {
-  hasZodFastifySchemaValidationErrors,
-  isResponseSerializationError,
-} from 'fastify-type-provider-zod';
+import { hasZodFastifySchemaValidationErrors, isResponseSerializationError } from 'fastify-type-provider-zod';
 
 /**
  * Every error response has the same shape:
@@ -20,8 +17,7 @@ export class AppError extends Error {
   }
 }
 
-export const notFound = (resource: string) =>
-  new AppError(404, 'NOT_FOUND', `${resource} not found`);
+export const notFound = (resource: string) => new AppError(404, 'NOT_FOUND', `${resource} not found`);
 
 export const conflict = (code: string, message: string, details?: unknown) =>
   new AppError(409, code, message, details);
@@ -32,8 +28,16 @@ export const unprocessable = (code: string, message: string, details?: unknown) 
 // https://www.postgresql.org/docs/current/errcodes-appendix.html
 const PG_ERRORS: Record<string, { status: number; code: string; message: string }> = {
   '23505': { status: 409, code: 'DUPLICATE', message: 'Resource already exists' },
-  '23503': { status: 409, code: 'REFERENCE_CONFLICT', message: 'Operation violates a reference to another resource' },
-  '23P01': { status: 409, code: 'EXCLUSION_CONFLICT', message: 'Operation conflicts with an existing resource' },
+  '23503': {
+    status: 409,
+    code: 'REFERENCE_CONFLICT',
+    message: 'Operation violates a reference to another resource',
+  },
+  '23P01': {
+    status: 409,
+    code: 'EXCLUSION_CONFLICT',
+    message: 'Operation conflicts with an existing resource',
+  },
   '23514': { status: 422, code: 'CONSTRAINT_VIOLATION', message: 'Operation violates a data constraint' },
 };
 

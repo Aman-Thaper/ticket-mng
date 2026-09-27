@@ -13,7 +13,9 @@ export function useApp() {
     await ctx.app.ready();
   });
   beforeEach(async () => {
-    await sql`TRUNCATE users, venues, venue_sections, venue_seats, events, event_seats RESTART IDENTITY CASCADE`.execute(db);
+    await sql`TRUNCATE users, venues, venue_sections, venue_seats, events, event_seats RESTART IDENTITY CASCADE`.execute(
+      db,
+    );
   });
   afterAll(async () => {
     await ctx.app.close();
@@ -35,7 +37,7 @@ export async function createUser(app: FastifyInstance, role: 'attendee' | 'organ
     payload: { email: `user${++seq}@example.com`, name: `User ${seq}`, role },
   });
   if (res.statusCode !== 201) throw new Error(res.body);
-  return res.json() as { id: string };
+  return res.json<{ id: string }>();
 }
 
 export async function createVenue(app: FastifyInstance, overrides: Record<string, unknown> = {}) {
@@ -55,7 +57,7 @@ export async function createVenue(app: FastifyInstance, overrides: Record<string
     },
   });
   if (res.statusCode !== 201) throw new Error(res.body);
-  return res.json() as { id: string; capacity: number };
+  return res.json<{ id: string; capacity: number }>();
 }
 
 export async function createEvent(

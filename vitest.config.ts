@@ -14,6 +14,9 @@ export default defineConfig({
           setupFiles: ['test/setup-env.ts'],
           // API tests share one database, so test files run one at a time.
           fileParallelism: false,
+          // Real Postgres/Redis round trips: generous limits so a busy machine doesn't cause flakes.
+          testTimeout: 20_000,
+          hookTimeout: 30_000,
         },
       },
     ],

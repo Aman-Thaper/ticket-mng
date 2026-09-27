@@ -2,7 +2,9 @@
 // src/config.ts is imported. Real env vars win over .env, so this override sticks.
 try {
   process.loadEnvFile();
-} catch {}
+} catch {
+  // no .env file (CI sets real env vars)
+}
 
 const url = process.env.TEST_DATABASE_URL;
 if (!url) throw new Error('TEST_DATABASE_URL is not set (see .env.example)');

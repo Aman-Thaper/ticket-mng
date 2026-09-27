@@ -6,8 +6,7 @@ const direction = process.argv[2] ?? 'latest';
 const migrator = createMigrator(db);
 
 try {
-  const result =
-    direction === 'down' ? await migrator.migrateDown() : await migrator.migrateToLatest();
+  const result = direction === 'down' ? await migrator.migrateDown() : await migrator.migrateToLatest();
   for (const r of result.results ?? []) {
     console.log(`${r.status.padEnd(8)} ${r.direction.padEnd(4)} ${r.migrationName}`);
   }

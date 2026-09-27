@@ -44,7 +44,10 @@ export const CreateEventBody = z
     category: z.enum(EVENT_CATEGORIES),
     startsAt: TimestampInput,
     endsAt: TimestampInput,
-    currency: z.string().regex(/^[A-Z]{3}$/, 'ISO 4217 code, e.g. "USD"').default('USD'),
+    currency: z
+      .string()
+      .regex(/^[A-Z]{3}$/, 'ISO 4217 code, e.g. "USD"')
+      .default('USD'),
     pricing: z
       .array(z.object({ section: z.string().min(1), priceCents: z.int().min(0).max(10_000_000) }))
       .min(1)
@@ -79,7 +82,7 @@ export const ListEventsQuery = z.object({
   from: TimestampInput.optional().describe('Only events starting at or after this time (default: now)'),
   to: TimestampInput.optional().describe('Only events starting before this time'),
   limit: Limit,
-  cursor: z.string().optional().describe('Opaque cursor from the previous page\'s `page.nextCursor`'),
+  cursor: z.string().optional().describe("Opaque cursor from the previous page's `page.nextCursor`"),
 });
 
 export const EventListResponse = z.object({

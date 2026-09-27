@@ -9,7 +9,10 @@ describe('cursor', () => {
 
   it.each(['garbage', Buffer.from('{"s":"nope","id":"x"}').toString('base64url'), ''])(
     'rejects malformed cursor %j with a 400',
-    (raw) => expect(() => decodeCursor(raw)).toThrow(expect.objectContaining({ statusCode: 400, code: 'INVALID_CURSOR' })),
+    (raw) =>
+      expect(() => decodeCursor(raw)).toThrow(
+        expect.objectContaining({ statusCode: 400, code: 'INVALID_CURSOR' }),
+      ),
   );
 });
 
