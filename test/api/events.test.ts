@@ -1,28 +1,33 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../src/db/index.js';
-import { createEvent, createUser, createVenue, inDays, useApp } from '../helpers.js';
+import { createEvent, createUser, createVenue, inDays, publish, useApp, type TestUser } from '../helpers.js';
 
 describe('events', () => {
   const t = useApp();
-  let ids: { organizerId: string; venueId: string };
+  let organizer: TestUser;
+  let venueId: string;
 
   beforeEach(async () => {
-    const [organizer, venue] = await Promise.all([createUser(t.app), createVenue(t.app)]);
-    ids = { organizerId: organizer.id, venueId: venue.id };
+    organizer = await createUser('organizer');
+    venueId = (await createVenue(t.app, organizer)).id;
   });
 
   describe('create', () => {
-    it('creates a draft event and a priced seat for every venue seat', async () => {
-      const res = await createEvent(t.app, ids);
+    it('creates a draft owned by the caller, with a priced seat for every venue seat', async () => {
+      const res = await createEvent(t.app, organizer, venueId);
       expect(res.statusCode).toBe(201);
       expect(res.json()).toMatchObject({
+        organizerId: organizer.id,
         status: 'draft',
         currency: 'USD',
         seats: { total: 14, available: 14 },
         priceRange: { minCents: 4500, maxCents: 8000 },
       });
 
-      const map = await t.app.inject({ url: `/api/v1/events/${res.json().id}/seats` });
+      const map = await t.app.inject({
+        url: `/api/v1/events/${res.json().id}/seats`,
+        headers: organizer.auth,
+      });
       const sections = map.json().sections;
       expect(sections.map((s: { name: string }) => s.name)).toEqual(['Floor', 'Balcony']);
       expect(sections[0].seats[0]).toMatchObject({
@@ -33,8 +38,17 @@ describe('events', () => {
       });
     });
 
+    it('requires an organizer or admin', async () => {
+      const attendee = await createUser('attendee');
+      const res = await createEvent(t.app, attendee, venueId);
+      expect(res.statusCode).toBe(403);
+      expect((await t.app.inject({ method: 'POST', url: '/api/v1/events', payload: {} })).statusCode).toBe(
+        401,
+      );
+    });
+
     it('requires every section to be priced exactly once', async () => {
-      const res = await createEvent(t.app, ids, {
+      const res = await createEvent(t.app, organizer, venueId, {
         pricing: [
           { section: 'Floor', priceCents: 100 },
           { section: 'VIP', priceCents: 100 },
@@ -47,58 +61,105 @@ describe('events', () => {
       });
     });
 
-    it('rejects attendees as organizers and unknown venues', async () => {
-      const attendee = await createUser(t.app, 'attendee');
-      expect((await createEvent(t.app, { ...ids, organizerId: attendee.id })).json().error.code).toBe(
-        'NOT_AN_ORGANIZER',
-      );
-      expect(
-        (await createEvent(t.app, { ...ids, venueId: '00000000-0000-4000-8000-000000000000' })).json().error
-          .code,
-      ).toBe('VENUE_NOT_FOUND');
+    it('rejects unknown venues', async () => {
+      const res = await createEvent(t.app, organizer, '00000000-0000-4000-8000-000000000000');
+      expect(res.json().error.code).toBe('VENUE_NOT_FOUND');
     });
 
     it('rejects events in the past or ending before they start', async () => {
-      expect((await createEvent(t.app, ids, { startsAt: inDays(-1), endsAt: inDays(1) })).statusCode).toBe(
-        400,
-      );
-      expect((await createEvent(t.app, ids, { startsAt: inDays(2), endsAt: inDays(1) })).statusCode).toBe(
-        400,
-      );
+      expect(
+        (await createEvent(t.app, organizer, venueId, { startsAt: inDays(-1), endsAt: inDays(1) }))
+          .statusCode,
+      ).toBe(400);
+      expect(
+        (await createEvent(t.app, organizer, venueId, { startsAt: inDays(2), endsAt: inDays(1) })).statusCode,
+      ).toBe(400);
     });
 
     it('prevents two overlapping events at the same venue (DB exclusion constraint)', async () => {
-      expect((await createEvent(t.app, ids, { startsAt: inDays(3), endsAt: inDays(3, 4) })).statusCode).toBe(
-        201,
-      );
-      const clash = await createEvent(t.app, ids, { startsAt: inDays(3, 2), endsAt: inDays(3, 6) });
+      const slot = (start: number, end: number) => ({ startsAt: inDays(3, start), endsAt: inDays(3, end) });
+      expect((await createEvent(t.app, organizer, venueId, slot(0, 4))).statusCode).toBe(201);
+      const clash = await createEvent(t.app, organizer, venueId, slot(2, 6));
       expect(clash.statusCode).toBe(409);
       expect(clash.json().error.code).toBe('VENUE_TIME_CONFLICT');
       // Back-to-back is fine: tstzrange is [start, end), so the ranges only touch.
-      expect(
-        (await createEvent(t.app, ids, { startsAt: inDays(3, 4), endsAt: inDays(3, 6) })).statusCode,
-      ).toBe(201);
+      expect((await createEvent(t.app, organizer, venueId, slot(4, 6))).statusCode).toBe(201);
     });
 
     it('holds under concurrency: 20 parallel creates for one slot, exactly one wins', async () => {
       const results = await Promise.all(
         Array.from({ length: 20 }, () =>
-          createEvent(t.app, ids, { startsAt: inDays(5), endsAt: inDays(5, 2) }),
+          createEvent(t.app, organizer, venueId, { startsAt: inDays(5), endsAt: inDays(5, 2) }),
         ),
       );
-      const codes = results.map((r) => r.statusCode).sort();
-      expect(codes.filter((c) => c === 201)).toHaveLength(1);
-      expect(codes.filter((c) => c === 409)).toHaveLength(19);
+      const codes = results.map((r) => r.statusCode);
+      expect(
+        codes.filter((c) => c === 201),
+        `status codes: ${codes.join(',')}`,
+      ).toHaveLength(1);
+      expect(
+        codes.filter((c) => c === 409),
+        `status codes: ${codes.join(',')}`,
+      ).toHaveLength(19);
+    });
+  });
+
+  describe('ownership and visibility', () => {
+    let eventId: string;
+    let other: TestUser;
+
+    beforeEach(async () => {
+      eventId = (await createEvent(t.app, organizer, venueId)).json().id;
+      other = await createUser('organizer');
+    });
+
+    it('hides drafts from everyone but the owner and admins (404, not 403)', async () => {
+      const admin = await createUser('admin');
+      expect((await t.app.inject({ url: `/api/v1/events/${eventId}` })).statusCode).toBe(404);
+      expect((await t.app.inject({ url: `/api/v1/events/${eventId}`, headers: other.auth })).statusCode).toBe(
+        404,
+      );
+      expect((await t.app.inject({ url: `/api/v1/events/${eventId}/seats` })).statusCode).toBe(404);
+      expect(
+        (await t.app.inject({ url: `/api/v1/events/${eventId}`, headers: organizer.auth })).statusCode,
+      ).toBe(200);
+      expect((await t.app.inject({ url: `/api/v1/events/${eventId}`, headers: admin.auth })).statusCode).toBe(
+        200,
+      );
+    });
+
+    it('lets other organizers see but not edit a published event, and admins edit anything', async () => {
+      await publish(t.app, organizer, eventId);
+      expect((await t.app.inject({ url: `/api/v1/events/${eventId}` })).statusCode).toBe(200);
+
+      const edit = (user: TestUser) =>
+        t.app.inject({
+          method: 'PATCH',
+          url: `/api/v1/events/${eventId}`,
+          headers: user.auth,
+          payload: { title: 'Mine now' },
+        });
+      expect((await edit(other)).statusCode).toBe(403);
+      expect((await edit(await createUser('admin'))).json().title).toBe('Mine now');
+    });
+
+    it("doesn't let another organizer delete a draft (they can't even see it)", async () => {
+      const res = await t.app.inject({
+        method: 'DELETE',
+        url: `/api/v1/events/${eventId}`,
+        headers: other.auth,
+      });
+      expect(res.statusCode).toBe(404);
     });
   });
 
   describe('status transitions', () => {
     let eventId: string;
     const patch = (payload: object) =>
-      t.app.inject({ method: 'PATCH', url: `/api/v1/events/${eventId}`, payload });
+      t.app.inject({ method: 'PATCH', url: `/api/v1/events/${eventId}`, headers: organizer.auth, payload });
 
     beforeEach(async () => {
-      eventId = (await createEvent(t.app, ids)).json().id;
+      eventId = (await createEvent(t.app, organizer, venueId)).json().id;
     });
 
     it('draft → published → cancelled, and cancelled is final', async () => {
@@ -117,7 +178,7 @@ describe('events', () => {
 
     it('frees the venue slot once an event is cancelled', async () => {
       await patch({ status: 'cancelled' });
-      expect((await createEvent(t.app, ids)).statusCode).toBe(201);
+      expect((await createEvent(t.app, organizer, venueId)).statusCode).toBe(201);
     });
 
     it('validates a new time against the stored one', async () => {
@@ -130,14 +191,17 @@ describe('events', () => {
     });
 
     it('deletes drafts but not published events', async () => {
-      const other = (await createEvent(t.app, ids, { startsAt: inDays(20), endsAt: inDays(20, 2) })).json()
-        .id;
+      const other = (
+        await createEvent(t.app, organizer, venueId, { startsAt: inDays(20), endsAt: inDays(20, 2) })
+      ).json().id;
       await patch({ status: 'published' });
+      const del = (id: string) =>
+        t.app.inject({ method: 'DELETE', url: `/api/v1/events/${id}`, headers: organizer.auth });
+      expect((await del(eventId)).json().error.code).toBe('EVENT_NOT_DRAFT');
+      expect((await del(other)).statusCode).toBe(204);
       expect(
-        (await t.app.inject({ method: 'DELETE', url: `/api/v1/events/${eventId}` })).json().error.code,
-      ).toBe('EVENT_NOT_DRAFT');
-      expect((await t.app.inject({ method: 'DELETE', url: `/api/v1/events/${other}` })).statusCode).toBe(204);
-      expect((await t.app.inject({ url: `/api/v1/events/${other}` })).statusCode).toBe(404);
+        (await t.app.inject({ url: `/api/v1/events/${other}`, headers: organizer.auth })).statusCode,
+      ).toBe(404);
     });
   });
 
@@ -145,19 +209,15 @@ describe('events', () => {
     beforeEach(async () => {
       // 25 published events, one per day, plus one draft that must not show up.
       for (let d = 1; d <= 25; d++) {
-        const res = await createEvent(t.app, ids, {
+        const res = await createEvent(t.app, organizer, venueId, {
           title: d === 13 ? 'Jazz under the stars' : `Show ${d}`,
           category: d % 2 ? 'concert' : 'comedy',
           startsAt: inDays(d),
           endsAt: inDays(d, 2),
         });
-        await t.app.inject({
-          method: 'PATCH',
-          url: `/api/v1/events/${res.json().id}`,
-          payload: { status: 'published' },
-        });
+        await publish(t.app, organizer, res.json().id);
       }
-      await createEvent(t.app, ids, { startsAt: inDays(40), endsAt: inDays(40, 2) });
+      await createEvent(t.app, organizer, venueId, { startsAt: inDays(40), endsAt: inDays(40, 2) });
     });
 
     it('walks every page with the cursor without gaps or duplicates', async () => {
@@ -193,7 +253,16 @@ describe('events', () => {
       expect(
         await get(`from=${encodeURIComponent(inDays(10))}&to=${encodeURIComponent(inDays(15))}`),
       ).toHaveLength(5);
-      expect(await get('status=draft')).toHaveLength(1);
+    });
+
+    it('shows drafts only to their organizer (and admins)', async () => {
+      const drafts = (headers?: object) =>
+        t.app.inject({ url: '/api/v1/events?status=draft&limit=100', headers: { ...headers } });
+      expect((await drafts()).statusCode).toBe(401);
+      expect((await drafts((await createUser('attendee')).auth)).statusCode).toBe(403);
+      expect((await drafts(organizer.auth)).json().data).toHaveLength(1);
+      expect((await drafts((await createUser('organizer')).auth)).json().data).toHaveLength(0);
+      expect((await drafts((await createUser('admin')).auth)).json().data).toHaveLength(1);
     });
 
     it('lists only upcoming events unless an earlier `from` is given', async () => {
@@ -201,7 +270,8 @@ describe('events', () => {
       await db
         .insertInto('events')
         .values({
-          ...ids,
+          organizerId: organizer.id,
+          venueId,
           title: 'Last year',
           category: 'concert',
           status: 'published',

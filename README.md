@@ -9,7 +9,7 @@ An event ticketing backend built phase by phase to practise the hard parts: conc
 | Phase | Scope                                                                                               | Status |
 | ----- | --------------------------------------------------------------------------------------------------- | ------ |
 | 1     | Core API + schema: users, venues, seat layouts, events, seat inventory, search, pagination, Swagger | ✅     |
-| 2     | Auth: argon2, access + refresh tokens, password reset, roles/ownership                              | ⏳     |
+| 2     | Auth: argon2, access + refresh tokens, password reset, roles/ownership                              | ✅     |
 | 3     | Seat holds (10 min) + booking, race-condition test (200 concurrent requests), locking               |        |
 | 4     | Workers (BullMQ): QR ticket emails, poster uploads to MinIO, scheduled jobs, DLQ                    |        |
 | 5     | Payments + webhooks, idempotency keys, booking state machine                                        |        |
@@ -25,11 +25,15 @@ psql -U postgres -h localhost \
   -c "CREATE DATABASE ticket_mng OWNER ticket;" \
   -c "CREATE DATABASE ticket_mng_test OWNER ticket;"
 
-# 2. Configure, migrate, seed, run
+# 2. Local infrastructure: Redis, Mailpit (SMTP catcher) and MinIO (S3)
+brew install redis mailpit minio
+scripts/dev-services.sh start
+
+# 3. Configure, migrate, seed, run
 cp .env.example .env
 npm install
 npm run migrate
-npm run seed        # optional: ~1.5M rows, takes about 30 s
+npm run seed        # optional: ~1.5M rows, ~30 s. Every seeded user's password is password123
 npm run dev         # http://localhost:3000/docs
 ```
 
@@ -60,24 +64,31 @@ scripts/seed.ts
 test/unit, test/api
 ```
 
-## API (Phase 1)
+## API
 
 All routes are under `/api/v1`. Interactive docs are at `/docs`, and the raw spec is at `/docs/json`.
 
-| Method | Path                | Notes                                                                                                                   |
-| ------ | ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/users`            | temporary until Phase 2 signup                                                                                          |
-| GET    | `/users/:id`        |                                                                                                                         |
-| POST   | `/venues`           | generates seats from `sections: [{name, rows, seatsPerRow}]`                                                            |
-| GET    | `/venues`           | `q`, `city`, `limit`, `offset`                                                                                          |
-| GET    | `/venues/:id`       | includes section summary                                                                                                |
-| POST   | `/events`           | creates a **draft** and copies venue seats into priced inventory                                                        |
-| GET    | `/events`           | `q` (full-text), `city`, `category`, `venueId`, `organizerId`, `status`, `from` (default: now), `to`, `limit`, `cursor` |
-| GET    | `/events/:id`       | includes `seats {total, available}` and `priceRange`                                                                    |
-| PATCH  | `/events/:id`       | partial update and status transitions                                                                                   |
-| DELETE | `/events/:id`       | drafts only (others must be cancelled)                                                                                  |
-| GET    | `/events/:id/seats` | seat map grouped by section, with x/y, price and status                                                                 |
-| GET    | `/health`           | DB ping                                                                                                                 |
+| Method     | Path                                       | Notes                                                                                                                   |
+| ---------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| POST       | `/auth/signup`, `/auth/login`              | returns an access token; sets the refresh token as an httpOnly cookie                                                   |
+| POST       | `/auth/refresh`                            | rotates the refresh cookie; reusing an old one revokes the session                                                      |
+| POST       | `/auth/logout`, `/auth/logout-all`         | revoke this session / every session                                                                                     |
+| GET/DELETE | `/auth/sessions[/:id]`                     | list and revoke your logged-in devices                                                                                  |
+| POST       | `/auth/password/change`                    | revokes your other sessions                                                                                             |
+| POST       | `/auth/password-reset/request`, `/confirm` | emailed single-use token (30 min)                                                                                       |
+| GET/PATCH  | `/users/me`                                | your profile                                                                                                            |
+| GET        | `/users/:id`                               | admin                                                                                                                   |
+| PATCH      | `/users/:id/role`                          | admin; revokes the user's sessions                                                                                      |
+| POST       | `/venues`                                  | organizer/admin; generates seats from `sections: [{name, rows, seatsPerRow}]`                                           |
+| GET        | `/venues`                                  | `q`, `city`, `limit`, `offset`                                                                                          |
+| GET        | `/venues/:id`                              | includes section summary                                                                                                |
+| POST       | `/events`                                  | creates a **draft** and copies venue seats into priced inventory                                                        |
+| GET        | `/events`                                  | `q` (full-text), `city`, `category`, `venueId`, `organizerId`, `status`, `from` (default: now), `to`, `limit`, `cursor` |
+| GET        | `/events/:id`                              | includes `seats {total, available}` and `priceRange`                                                                    |
+| PATCH      | `/events/:id`                              | partial update and status transitions                                                                                   |
+| DELETE     | `/events/:id`                              | drafts only (others must be cancelled)                                                                                  |
+| GET        | `/events/:id/seats`                        | seat map grouped by section, with x/y, price and status                                                                 |
+| GET        | `/health`                                  | DB ping                                                                                                                 |
 
 **Errors** always have the shape `{ "error": { "code", "message", "details?" } }`.
 

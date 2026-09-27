@@ -11,6 +11,7 @@ import { sql } from 'kysely';
 import { config } from '../src/config.js';
 import { db } from '../src/db/index.js';
 import { EVENT_CATEGORIES, type EventCategory, type EventStatus } from '../src/db/types.js';
+import { hashPassword } from '../src/modules/auth/passwords.js';
 import { generateSeats } from '../src/modules/venues/layout.js';
 
 const USERS = Number(process.env.SEED_USERS ?? 50_000);
@@ -18,6 +19,7 @@ const VENUES = Number(process.env.SEED_VENUES ?? 500);
 const EVENTS_PER_VENUE = Number(process.env.SEED_EVENTS_PER_VENUE ?? 400);
 const EVENTS_WITH_INVENTORY = 1_000;
 const BATCH = 10_000;
+const SEED_PASSWORD = 'password123';
 
 if (config.NODE_ENV === 'production') throw new Error('Refusing to seed a production database');
 
@@ -49,12 +51,14 @@ function title(category: EventCategory): string {
 }
 
 try {
-  await sql`TRUNCATE users, venues, venue_sections, venue_seats, events, event_seats RESTART IDENTITY CASCADE`.execute(
-    db,
-  );
+  // Every application table (all of them hang off users or venues).
+  await sql`TRUNCATE users, venues RESTART IDENTITY CASCADE`.execute(db);
   log('truncated');
 
   // ---------------------------------------------------------------- users
+  // Every seeded account shares one password. Hashing once and reusing the hash keeps the
+  // seed fast (argon2 is deliberately slow); real signups get a unique salt each.
+  const passwordHash = await hashPassword(SEED_PASSWORD);
   const organizerIds: string[] = [];
   for (const batch of chunks(
     Array.from({ length: USERS }, (_, i) => i),
@@ -62,8 +66,8 @@ try {
   )) {
     const roles = batch.map((i) => (i === 0 ? 'admin' : i % 50 === 0 ? 'organizer' : 'attendee'));
     const rows = await sql<{ id: string; role: string }>`
-      INSERT INTO users (email, name, role)
-      SELECT * FROM unnest(
+      INSERT INTO users (email, name, role, password_hash, password_changed_at)
+      SELECT *, ${passwordHash}, now() FROM unnest(
         ${batch.map((i) => (i === 0 ? 'admin@example.com' : `user${i}@example.com`))}::text[],
         ${batch.map(() => faker.person.fullName())}::text[],
         ${roles}::user_role[]
@@ -72,7 +76,8 @@ try {
     `.execute(db);
     organizerIds.push(...rows.rows.filter((r) => r.role === 'organizer').map((r) => r.id));
   }
-  log(`users: ${USERS} (${organizerIds.length} organizers; admin@example.com is the admin)`);
+  log(`users: ${USERS} (${organizerIds.length} organizers). Password for all: ${SEED_PASSWORD}`);
+  log('  admin@example.com is the admin; user50@example.com, user100@example.com, ... are organizers');
 
   // ---------------------------------------------------------------- venues + seats
   const venueIds: string[] = [];

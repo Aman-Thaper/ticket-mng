@@ -22,8 +22,40 @@ export interface UsersTable {
   email: string;
   name: string;
   role: Generated<UserRole>;
+  passwordHash: string | null;
+  passwordChangedAt: Date | null;
   createdAt: CreatedAt;
   updatedAt: UpdatedAt;
+}
+
+export interface SessionsTable {
+  id: Generated<string>;
+  userId: string;
+  createdAt: CreatedAt;
+  lastUsedAt: Generated<Date>;
+  expiresAt: Date;
+  revokedAt: Date | null;
+  revokeReason: string | null;
+  userAgent: string | null;
+  ip: string | null;
+}
+
+export interface RefreshTokensTable {
+  id: Generated<string>;
+  sessionId: string;
+  tokenHash: Buffer;
+  createdAt: CreatedAt;
+  expiresAt: Date;
+  usedAt: Date | null;
+}
+
+export interface PasswordResetTokensTable {
+  id: Generated<string>;
+  userId: string;
+  tokenHash: Buffer;
+  createdAt: CreatedAt;
+  expiresAt: Date;
+  usedAt: Date | null;
 }
 
 export interface VenuesTable {
@@ -78,6 +110,9 @@ export interface EventSeatsTable {
 
 export interface DB {
   users: UsersTable;
+  sessions: SessionsTable;
+  refreshTokens: RefreshTokensTable;
+  passwordResetTokens: PasswordResetTokensTable;
   venues: VenuesTable;
   venueSections: VenueSectionsTable;
   venueSeats: VenueSeatsTable;

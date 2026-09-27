@@ -19,6 +19,14 @@ export class AppError extends Error {
 
 export const notFound = (resource: string) => new AppError(404, 'NOT_FOUND', `${resource} not found`);
 
+/** 401: the caller isn't (validly) authenticated. */
+export const unauthorized = (code = 'UNAUTHENTICATED', message = 'Authentication required') =>
+  new AppError(401, code, message);
+
+/** 403: authenticated, but not allowed to do this. */
+export const forbidden = (message = 'You do not have permission to perform this action') =>
+  new AppError(403, 'FORBIDDEN', message);
+
 export const conflict = (code: string, message: string, details?: unknown) =>
   new AppError(409, code, message, details);
 
@@ -69,6 +77,10 @@ export function errorHandler(err: FastifyError, req: FastifyRequest, reply: Fast
   }
 
   if (err instanceof AppError) {
+    // RFC 6750: tell clients which auth scheme to use (and why a token was rejected).
+    if (err.statusCode === 401) {
+      reply.header('www-authenticate', `Bearer error="invalid_token", error_description="${err.code}"`);
+    }
     return reply.status(err.statusCode).send({
       error: { code: err.code, message: err.message, details: err.details },
     });
@@ -82,6 +94,19 @@ export function errorHandler(err: FastifyError, req: FastifyRequest, reply: Fast
     req.log.info({ constraint: pgErr.constraint }, 'constraint violation');
     return reply.status(mapped.status).send({
       error: { code: mapped.code, message: mapped.message, details: { constraint: pgErr.constraint } },
+    });
+  }
+
+  // Deadlock victim / serialization failure that survived withTransaction's retries (or
+  // came from code that doesn't retry). The request was fine; the client should try again.
+  if (pgErr && (pgErr.code === '40P01' || pgErr.code === '40001')) {
+    req.log.warn({ code: pgErr.code }, 'transient database conflict');
+    reply.header('retry-after', 1);
+    return reply.status(503).send({
+      error: {
+        code: 'TRANSIENT_CONFLICT',
+        message: 'The request conflicted with a concurrent one; please retry',
+      },
     });
   }
 

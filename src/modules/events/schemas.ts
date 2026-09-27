@@ -36,8 +36,6 @@ const endsAfterStart = (b: { startsAt?: string; endsAt?: string }) =>
 
 export const CreateEventBody = z
   .object({
-    // TEMPORARY: in Phase 2 the organizer comes from the access token, not the body.
-    organizerId: z.uuid(),
     venueId: z.uuid(),
     title: z.string().trim().min(1).max(200),
     description: z.string().trim().max(5000).default(''),
@@ -78,7 +76,10 @@ export const ListEventsQuery = z.object({
   category: z.enum(EVENT_CATEGORIES).optional(),
   venueId: z.uuid().optional(),
   organizerId: z.uuid().optional(),
-  status: z.enum(EVENT_STATUSES).default('published'),
+  status: z
+    .enum(EVENT_STATUSES)
+    .default('published')
+    .describe('draft requires auth: organizers see their own drafts, admins see all'),
   from: TimestampInput.optional().describe('Only events starting at or after this time (default: now)'),
   to: TimestampInput.optional().describe('Only events starting before this time'),
   limit: Limit,

@@ -6,6 +6,7 @@ import type { Venue } from '../../db/types.js';
 import { notFound } from '../../lib/errors.js';
 import { escapeLike } from '../../lib/pagination.js';
 import { errors, IdParams, Limit, Timestamp } from '../../lib/schemas.js';
+import { bearerAuth, requireRole } from '../auth/guard.js';
 import { generateSeats } from './layout.js';
 
 const MAX_SEATS_PER_VENUE = 50_000;
@@ -76,9 +77,11 @@ export const venueRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post(
     '/venues',
     {
+      onRequest: requireRole('organizer', 'admin'),
       schema: {
         tags: ['venues'],
-        summary: 'Create a venue and generate its seat layout',
+        summary: 'Create a venue and generate its seat layout (organizer or admin)',
+        security: bearerAuth,
         description:
           'The layout is immutable after creation, because events copy it into their own seat inventory.',
         body: CreateVenueBody,

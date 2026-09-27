@@ -1,11 +1,20 @@
 import { z } from 'zod';
-import { sql, type Kysely } from 'kysely';
+import { sql, type Kysely, type Transaction } from 'kysely';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { db } from '../../db/index.js';
-import type { DB } from '../../db/types.js';
-import { AppError, conflict, notFound, unprocessable } from '../../lib/errors.js';
+import { withTransaction } from '../../db/transaction.js';
+import type { DB, EventStatus } from '../../db/types.js';
+import { AppError, conflict, forbidden, notFound, unauthorized, unprocessable } from '../../lib/errors.js';
 import { decodeCursor, encodeCursor } from '../../lib/pagination.js';
 import { errors, IdParams } from '../../lib/schemas.js';
+import {
+  bearerAuth,
+  canManage,
+  currentUser,
+  optionalAuth,
+  requireRole,
+  type AuthUser,
+} from '../auth/guard.js';
 import type { EventDto } from './schemas.js';
 import {
   CreateEventBody,
@@ -57,7 +66,20 @@ const toEventDto = (r: EventRow): z.infer<typeof EventDto> => ({
   updatedAt: r.updatedAt.toISOString(),
 });
 
-async function getEventDetail(id: string): Promise<z.infer<typeof EventDetailDto>> {
+/**
+ * Drafts are private to their organizer (and admins). To everyone else a draft doesn't
+ * exist: they get 404, not 403, so its existence isn't leaked.
+ */
+const isVisible = (event: { status: EventStatus; organizerId: string }, viewer: AuthUser | null) =>
+  event.status !== 'draft' || canManage(viewer, event.organizerId);
+
+/** Ownership check for mutations: invisible → 404, visible but not yours → 403. */
+function assertCanManage(event: { status: EventStatus; organizerId: string }, user: AuthUser) {
+  if (canManage(user, event.organizerId)) return;
+  throw event.status === 'draft' ? notFound('Event') : forbidden('Only the event organizer can do this');
+}
+
+async function getEventDetail(id: string, viewer: AuthUser | null): Promise<z.infer<typeof EventDetailDto>> {
   const [event, stats] = await Promise.all([
     selectEvents(db).where('e.id', '=', id).executeTakeFirst(),
     db
@@ -71,7 +93,7 @@ async function getEventDetail(id: string): Promise<z.infer<typeof EventDetailDto
       ])
       .executeTakeFirstOrThrow(),
   ]);
-  if (!event) throw notFound('Event');
+  if (!event || !isVisible(event, viewer)) throw notFound('Event');
 
   return {
     ...toEventDto(event),
@@ -90,6 +112,17 @@ function isVenueOverlap(err: unknown) {
   );
 }
 
+/** Take the venue's schedule lock (see POST /events). */
+async function lockVenueSchedule(trx: Transaction<DB>, venueId: string) {
+  const venue = await trx
+    .selectFrom('venues')
+    .select('id')
+    .where('id', '=', venueId)
+    .forNoKeyUpdate()
+    .executeTakeFirst();
+  if (!venue) throw unprocessable('VENUE_NOT_FOUND', 'Venue does not exist');
+}
+
 const venueOverlap = () =>
   conflict('VENUE_TIME_CONFLICT', 'The venue already has an event overlapping this time slot');
 
@@ -97,26 +130,18 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post(
     '/events',
     {
+      onRequest: requireRole('organizer', 'admin'),
       schema: {
         tags: ['events'],
         summary: 'Create an event (as a draft) and its seat inventory',
+        security: bearerAuth,
         body: CreateEventBody,
         response: { 201: EventDetailDto, ...errors },
       },
     },
     async (req, reply) => {
-      const { pricing, organizerId, venueId, ...fields } = req.body;
-
-      const organizer = await db
-        .selectFrom('users')
-        .select('role')
-        .where('id', '=', organizerId)
-        .executeTakeFirst();
-      if (!organizer) throw unprocessable('ORGANIZER_NOT_FOUND', 'Organizer does not exist');
-      if (organizer.role === 'attendee') {
-        // Becomes a 403 in Phase 2, when this is decided by the caller's token.
-        throw unprocessable('NOT_AN_ORGANIZER', 'User is not an organizer');
-      }
+      const user = currentUser(req);
+      const { pricing, venueId, ...fields } = req.body;
 
       const sections = await db
         .selectFrom('venueSections')
@@ -138,12 +163,20 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
 
       let eventId: string;
       try {
-        eventId = await db.transaction().execute(async (trx) => {
+        eventId = await withTransaction(async (trx) => {
+          // Serialize schedule changes per venue. Without this, two concurrent inserts for
+          // overlapping slots can each find the other's uncommitted row in the exclusion
+          // constraint check and wait on each other: a deadlock that Postgres only breaks
+          // after deadlock_timeout (1 s), once per victim. With the venue row locked, they
+          // queue up instead, and each later one fails fast with a clean 23P01 (409).
+          // NO KEY UPDATE doesn't block the foreign-key checks of unrelated inserts.
+          await lockVenueSchedule(trx, venueId);
+
           const { id } = await trx
             .insertInto('events')
             .values({
               ...fields,
-              organizerId,
+              organizerId: user.id,
               venueId,
               startsAt: new Date(fields.startsAt),
               endsAt: new Date(fields.endsAt),
@@ -173,13 +206,14 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
       return reply
         .status(201)
         .header('location', `/api/v1/events/${eventId}`)
-        .send(await getEventDetail(eventId));
+        .send(await getEventDetail(eventId, user));
     },
   );
 
   app.get(
     '/events',
     {
+      onRequest: optionalAuth,
       schema: {
         tags: ['events'],
         summary: 'Search and list events (cursor pagination, ordered by start time)',
@@ -188,7 +222,18 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
       },
     },
     async (req) => {
-      const { q, city, category, venueId, organizerId, status, from, to, limit, cursor } = req.query;
+      const { q, city, category, venueId, status, from, to, limit, cursor } = req.query;
+      let { organizerId } = req.query;
+
+      if (status === 'draft') {
+        const user = req.user;
+        if (!user) throw unauthorized();
+        if (user.role === 'attendee') throw forbidden('Only organizers can list drafts');
+        if (user.role === 'organizer') {
+          if (organizerId && organizerId !== user.id) throw forbidden('You can only list your own drafts');
+          organizerId = user.id;
+        }
+      }
 
       let query = selectEvents(db).where('e.status', '=', status);
       if (q) query = query.where(sql<boolean>`e.search @@ websearch_to_tsquery('english', ${q})`);
@@ -229,6 +274,7 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
   app.get(
     '/events/:id',
     {
+      onRequest: optionalAuth,
       schema: {
         tags: ['events'],
         summary: 'Get an event with seat availability and price range',
@@ -236,38 +282,42 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
         response: { 200: EventDetailDto, ...errors },
       },
     },
-    async (req) => getEventDetail(req.params.id),
+    async (req) => getEventDetail(req.params.id, req.user),
   );
 
   app.patch(
     '/events/:id',
     {
+      onRequest: requireRole('organizer', 'admin'),
       schema: {
         tags: ['events'],
-        summary: 'Update an event or change its status',
+        summary: 'Update an event or change its status (owner or admin)',
         description: `Status transitions: ${Object.entries(STATUS_TRANSITIONS)
           .map(([from, to]) => `${from} → ${to.length ? to.join(' | ') : '(final)'}`)
           .join('; ')}. Cancelled events cannot be edited.`,
+        security: bearerAuth,
         params: IdParams,
         body: UpdateEventBody,
         response: { 200: EventDetailDto, ...errors },
       },
     },
     async (req) => {
+      const user = currentUser(req);
       const { id } = req.params;
       const patch = req.body;
 
       try {
-        await db.transaction().execute(async (trx) => {
+        await withTransaction(async (trx) => {
           // FOR UPDATE locks the row until commit, so two concurrent PATCHes can't both read
-          // "draft" and apply conflicting transitions. Phase 3 relies on this same lock.
+          // "draft" and apply conflicting transitions.
           const current = await trx
             .selectFrom('events')
-            .select(['status', 'startsAt', 'endsAt'])
+            .select(['status', 'organizerId', 'venueId', 'startsAt', 'endsAt'])
             .where('id', '=', id)
             .forUpdate()
             .executeTakeFirst();
           if (!current) throw notFound('Event');
+          assertCanManage(current, user);
 
           if (current.status === 'cancelled') {
             throw conflict('EVENT_CANCELLED', 'Cancelled events cannot be modified');
@@ -280,7 +330,9 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
             throw conflict(
               'INVALID_STATUS_TRANSITION',
               `Cannot change status from ${current.status} to ${patch.status}`,
-              { allowed: STATUS_TRANSITIONS[current.status] },
+              {
+                allowed: STATUS_TRANSITIONS[current.status],
+              },
             );
           }
 
@@ -289,6 +341,8 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
           if (endsAt <= startsAt) {
             throw new AppError(400, 'VALIDATION_ERROR', 'endsAt must be after startsAt');
           }
+          // Moving an event in time is a schedule change: same per-venue lock as creation.
+          if (patch.startsAt || patch.endsAt) await lockVenueSchedule(trx, current.venueId);
 
           await trx
             .updateTable('events')
@@ -301,40 +355,44 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
         throw err;
       }
 
-      return getEventDetail(id);
+      return getEventDetail(id, user);
     },
   );
 
   app.delete(
     '/events/:id',
     {
+      onRequest: requireRole('organizer', 'admin'),
       schema: {
         tags: ['events'],
-        summary: 'Delete a draft event',
+        summary: 'Delete a draft event (owner or admin)',
         description:
           'Only drafts can be deleted. Published events must be cancelled instead, which keeps their history.',
+        security: bearerAuth,
         params: IdParams,
         response: { 204: z.null().describe('Deleted'), ...errors },
       },
     },
     async (req, reply) => {
+      const event = await db
+        .selectFrom('events')
+        .select(['status', 'organizerId'])
+        .where('id', '=', req.params.id)
+        .executeTakeFirst();
+      if (!event) throw notFound('Event');
+      assertCanManage(event, currentUser(req));
+
+      // The status condition makes this safe even if the event is published concurrently.
       const deleted = await db
         .deleteFrom('events')
         .where('id', '=', req.params.id)
         .where('status', '=', 'draft')
         .returning('id')
         .executeTakeFirst();
-
       if (!deleted) {
-        const exists = await db
-          .selectFrom('events')
-          .select('status')
-          .where('id', '=', req.params.id)
-          .executeTakeFirst();
-        if (!exists) throw notFound('Event');
         throw conflict(
           'EVENT_NOT_DRAFT',
-          `Only draft events can be deleted (status is ${exists.status}); cancel it instead`,
+          `Only draft events can be deleted (status is ${event.status}); cancel it instead`,
         );
       }
       return reply.status(204).send(null);
@@ -344,6 +402,7 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
   app.get(
     '/events/:id/seats',
     {
+      onRequest: optionalAuth,
       schema: {
         tags: ['events'],
         summary: 'Seat map for an event, with price and status per seat',
@@ -354,10 +413,10 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
     async (req) => {
       const event = await db
         .selectFrom('events')
-        .select(['id', 'currency'])
+        .select(['id', 'currency', 'status', 'organizerId'])
         .where('id', '=', req.params.id)
         .executeTakeFirst();
-      if (!event) throw notFound('Event');
+      if (!event || !isVisible(event, req.user)) throw notFound('Event');
 
       const rows = await db
         .selectFrom('eventSeats as es')

@@ -1,11 +1,16 @@
-import { describe, expect, it } from 'vitest';
-import { createVenue, useApp } from '../helpers.js';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { createUser, createVenue, useApp, type TestUser } from '../helpers.js';
 
 describe('venues', () => {
   const t = useApp();
+  let organizer: TestUser;
+
+  beforeEach(async () => {
+    organizer = await createUser('organizer');
+  });
 
   it('creates a venue with its generated seat layout', async () => {
-    const venue = await createVenue(t.app);
+    const venue = await createVenue(t.app, organizer);
     expect(venue.capacity).toBe(2 * 5 + 1 * 4);
 
     const res = await t.app.inject({ url: `/api/v1/venues/${venue.id}` });
@@ -16,10 +21,18 @@ describe('venues', () => {
     ]);
   });
 
+  it('only lets organizers and admins create venues', async () => {
+    const attendee = await createUser('attendee');
+    await expect(createVenue(t.app, attendee)).rejects.toThrow(/FORBIDDEN/);
+    const anon = await t.app.inject({ method: 'POST', url: '/api/v1/venues', payload: {} });
+    expect(anon.statusCode).toBe(401); // auth runs before validation
+  });
+
   it('validates the body and reports every problem with its path', async () => {
     const res = await t.app.inject({
       method: 'POST',
       url: '/api/v1/venues',
+      headers: organizer.auth,
       payload: { name: '', city: 'X', country: 'germany', address: 'a', sections: [] },
     });
     expect(res.statusCode).toBe(400);
@@ -31,6 +44,7 @@ describe('venues', () => {
     const res = await t.app.inject({
       method: 'POST',
       url: '/api/v1/venues',
+      headers: organizer.auth,
       payload: {
         name: 'V',
         address: 'a',
@@ -46,9 +60,9 @@ describe('venues', () => {
   });
 
   it('lists with search, city filter and offset pagination', async () => {
-    await createVenue(t.app, { name: 'Royal Albert Hall', city: 'London', country: 'GB' });
-    await createVenue(t.app, { name: 'O2 Arena', city: 'London', country: 'GB' });
-    await createVenue(t.app, { name: 'Madison Square Garden', city: 'New York', country: 'US' });
+    await createVenue(t.app, organizer, { name: 'Royal Albert Hall', city: 'London', country: 'GB' });
+    await createVenue(t.app, organizer, { name: 'O2 Arena', city: 'London', country: 'GB' });
+    await createVenue(t.app, organizer, { name: 'Madison Square Garden', city: 'New York', country: 'US' });
 
     const london = await t.app.inject({ url: '/api/v1/venues?city=london&limit=1' });
     expect(london.json().data).toHaveLength(1);
@@ -59,7 +73,7 @@ describe('venues', () => {
   });
 
   it('treats LIKE wildcards in search literally', async () => {
-    await createVenue(t.app, { name: 'Anything' });
+    await createVenue(t.app, organizer, { name: 'Anything' });
     const res = await t.app.inject({ url: '/api/v1/venues?q=%25' }); // q=%
     expect(res.json().data).toHaveLength(0);
   });

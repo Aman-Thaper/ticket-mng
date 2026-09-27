@@ -1,68 +1,70 @@
 import { z } from 'zod';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { db } from '../../db/index.js';
-import { USER_ROLES, type User } from '../../db/types.js';
-import { conflict, notFound } from '../../lib/errors.js';
-import { errors, IdParams, Timestamp } from '../../lib/schemas.js';
+import { USER_ROLES } from '../../db/types.js';
+import { notFound, unprocessable } from '../../lib/errors.js';
+import { errors, IdParams } from '../../lib/schemas.js';
+import { bearerAuth, currentUser, requireAuth, requireRole } from '../auth/guard.js';
+import { denylistSessions, revokeSessions } from '../auth/sessions.js';
+import { toUserDto, UserDto } from './dto.js';
 
-export const UserDto = z
-  .object({
-    id: z.uuid(),
-    email: z.email(),
-    name: z.string(),
-    role: z.enum(USER_ROLES),
-    createdAt: Timestamp,
-  })
-  .meta({ id: 'User' });
-
-// Every response goes through an explicit DTO. Once users get a password_hash column,
-// it can never leak by accident.
-export const toUserDto = (u: User): z.infer<typeof UserDto> => ({
-  id: u.id,
-  email: u.email,
-  name: u.name,
-  role: u.role,
-  createdAt: u.createdAt.toISOString(),
-});
-
-const CreateUserBody = z.object({
-  email: z.email().max(254),
-  name: z.string().trim().min(1).max(100),
-  // Admins are never created through the public API.
-  role: z.enum(['attendee', 'organizer']).default('attendee'),
-});
+const userColumns = ['id', 'email', 'name', 'role', 'createdAt'] as const;
 
 export const userRoutes: FastifyPluginAsyncZod = async (app) => {
-  // TEMPORARY: Phase 2 replaces this with POST /auth/signup (password hashing, tokens).
-  app.post(
-    '/users',
+  app.get(
+    '/users/me',
     {
+      onRequest: requireAuth,
       schema: {
         tags: ['users'],
-        summary: 'Create a user (temporary until auth lands in Phase 2)',
-        body: CreateUserBody,
-        response: { 201: UserDto, ...errors },
+        summary: 'The authenticated user',
+        security: bearerAuth,
+        response: { 200: UserDto, ...errors },
       },
     },
-    async (req, reply) => {
+    async (req) => {
       const user = await db
-        .insertInto('users')
-        .values(req.body)
-        .onConflict((oc) => oc.column('email').doNothing())
-        .returningAll()
+        .selectFrom('users')
+        .select(userColumns)
+        .where('id', '=', currentUser(req).id)
         .executeTakeFirst();
-      if (!user) throw conflict('EMAIL_TAKEN', 'A user with this email already exists');
+      if (!user) throw notFound('User');
+      return toUserDto(user);
+    },
+  );
 
-      return reply.status(201).header('location', `/api/v1/users/${user.id}`).send(toUserDto(user));
+  app.patch(
+    '/users/me',
+    {
+      onRequest: requireAuth,
+      schema: {
+        tags: ['users'],
+        summary: 'Update your profile',
+        security: bearerAuth,
+        body: z.object({ name: z.string().trim().min(1).max(100) }),
+        response: { 200: UserDto, ...errors },
+      },
+    },
+    async (req) => {
+      const user = await db
+        .updateTable('users')
+        .set({ name: req.body.name })
+        .where('id', '=', currentUser(req).id)
+        .returning(userColumns)
+        .executeTakeFirst();
+      if (!user) throw notFound('User');
+      return toUserDto(user);
     },
   );
 
   app.get(
     '/users/:id',
     {
+      onRequest: requireRole('admin'),
       schema: {
         tags: ['users'],
-        summary: 'Get a user',
+        summary: 'Get any user (admin)',
+        security: bearerAuth,
         params: IdParams,
         response: { 200: UserDto, ...errors },
       },
@@ -70,11 +72,48 @@ export const userRoutes: FastifyPluginAsyncZod = async (app) => {
     async (req) => {
       const user = await db
         .selectFrom('users')
-        .selectAll()
+        .select(userColumns)
         .where('id', '=', req.params.id)
         .executeTakeFirst();
       if (!user) throw notFound('User');
       return toUserDto(user);
+    },
+  );
+
+  app.patch(
+    '/users/:id/role',
+    {
+      onRequest: requireRole('admin'),
+      schema: {
+        tags: ['users'],
+        summary: "Change a user's role (admin)",
+        description:
+          "Revokes the user's sessions so the new role applies immediately instead of when their current access token expires.",
+        security: bearerAuth,
+        params: IdParams,
+        body: z.object({ role: z.enum(USER_ROLES) }),
+        response: { 200: UserDto, ...errors },
+      },
+    },
+    async (req) => {
+      if (req.params.id === currentUser(req).id) {
+        throw unprocessable('CANNOT_CHANGE_OWN_ROLE', 'Admins cannot change their own role');
+      }
+
+      const result = await db.transaction().execute(async (trx) => {
+        const user = await trx
+          .updateTable('users')
+          .set({ role: req.body.role })
+          .where('id', '=', req.params.id)
+          .returning(userColumns)
+          .executeTakeFirst();
+        if (!user) return null;
+        return { user, revoked: await revokeSessions(trx, { userId: user.id }, 'role_changed') };
+      });
+      if (!result) throw notFound('User');
+
+      await denylistSessions(result.revoked);
+      return toUserDto(result.user);
     },
   );
 };
