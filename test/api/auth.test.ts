@@ -4,7 +4,7 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { config } from '../../src/config.js';
 import { db } from '../../src/db/index.js';
 import { sentMail } from '../../src/lib/mailer.js';
-import { useApp } from '../helpers.js';
+import { runQueuedJobs, useApp } from '../helpers.js';
 
 const PASSWORD = 'correct horse battery';
 
@@ -310,7 +310,8 @@ describe('auth', () => {
       });
       expect(res.statusCode).toBe(202);
 
-      await expect.poll(() => sentMail.length).toBe(1);
+      await runQueuedJobs();
+      expect(sentMail).toHaveLength(1);
       const token = /#token=([\w-]+)/.exec(sentMail[0]!.text)![1]!;
       expect(sentMail[0]!.to).toBe('ada@example.com');
 
@@ -339,6 +340,7 @@ describe('auth', () => {
         payload: { email: 'nobody@example.com' },
       });
       expect(res.statusCode).toBe(202);
+      await runQueuedJobs();
       expect(sentMail).toHaveLength(0);
     });
 
@@ -349,7 +351,8 @@ describe('auth', () => {
         url: '/api/v1/auth/password-reset/request',
         payload: { email: 'ada@example.com' },
       });
-      await expect.poll(() => sentMail.length).toBe(1);
+      await runQueuedJobs();
+      expect(sentMail).toHaveLength(1);
       const token = /#token=([\w-]+)/.exec(sentMail[0]!.text)![1]!;
       await db
         .updateTable('passwordResetTokens')

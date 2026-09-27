@@ -3,20 +3,14 @@ import { sql, type Kysely, type Transaction } from 'kysely';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { db } from '../../db/index.js';
 import { withTransaction } from '../../db/transaction.js';
-import type { DB, EventStatus, SeatStatus } from '../../db/types.js';
+import type { DB, SeatStatus } from '../../db/types.js';
 import { AppError, conflict, forbidden, notFound, unauthorized, unprocessable } from '../../lib/errors.js';
 import { acquirableSql, cancelPendingBookingsForEvent } from '../bookings/service.js';
 import { decodeCursor, encodeCursor } from '../../lib/pagination.js';
 import { errors, IdParams } from '../../lib/schemas.js';
-import {
-  bearerAuth,
-  canManage,
-  currentUser,
-  optionalAuth,
-  requireRole,
-  type AuthUser,
-} from '../auth/guard.js';
-import type { EventDto } from './schemas.js';
+import { bearerAuth, currentUser, optionalAuth, requireRole, type AuthUser } from '../auth/guard.js';
+import { assertCanManage, isVisible } from './access.js';
+import { posterDto, type EventDto } from './schemas.js';
 import {
   CreateEventBody,
   EventDetailDto,
@@ -44,6 +38,9 @@ function selectEvents(conn: Kysely<DB>) {
       'e.salesStartAt',
       'e.maxTicketsPerUser',
       'e.currency',
+      'e.posterStatus',
+      'e.posterVariants',
+      'e.posterError',
       'e.createdAt',
       'e.updatedAt',
       'v.id as venueId',
@@ -67,22 +64,10 @@ const toEventDto = (r: EventRow): z.infer<typeof EventDto> => ({
   salesStartAt: r.salesStartAt?.toISOString() ?? null,
   maxTicketsPerUser: r.maxTicketsPerUser,
   currency: r.currency.trim(),
+  poster: posterDto(r.posterStatus, r.posterVariants, r.posterError),
   createdAt: r.createdAt.toISOString(),
   updatedAt: r.updatedAt.toISOString(),
 });
-
-/**
- * Drafts are private to their organizer (and admins). To everyone else a draft doesn't
- * exist: they get 404, not 403, so its existence isn't leaked.
- */
-const isVisible = (event: { status: EventStatus; organizerId: string }, viewer: AuthUser | null) =>
-  event.status !== 'draft' || canManage(viewer, event.organizerId);
-
-/** Ownership check for mutations: invisible → 404, visible but not yours → 403. */
-function assertCanManage(event: { status: EventStatus; organizerId: string }, user: AuthUser) {
-  if (canManage(user, event.organizerId)) return;
-  throw event.status === 'draft' ? notFound('Event') : forbidden('Only the event organizer can do this');
-}
 
 async function getEventDetail(id: string, viewer: AuthUser | null): Promise<z.infer<typeof EventDetailDto>> {
   const [event, stats] = await Promise.all([

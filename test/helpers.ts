@@ -5,6 +5,7 @@ import { buildApp } from '../src/app.js';
 import { db } from '../src/db/index.js';
 import type { UserRole } from '../src/db/types.js';
 import { sentMail } from '../src/lib/mailer.js';
+import { closeQueues } from '../src/jobs/queues.js';
 import { redis } from '../src/lib/redis.js';
 import { startSession } from '../src/modules/auth/sessions.js';
 
@@ -21,6 +22,7 @@ export function useApp() {
   });
   afterAll(async () => {
     await ctx.app.close();
+    await closeQueues();
     await Promise.all([db.destroy(), redis.quit()]);
   });
 
@@ -134,4 +136,46 @@ export function publish(app: FastifyInstance, organizer: TestUser, eventId: stri
     headers: organizer.auth,
     payload: { status: 'published' },
   });
+}
+
+/**
+ * Run queued background jobs synchronously: take unpublished outbox rows (and any rows their
+ * handlers add) and call the real handlers directly, without Redis or workers. Tests stay
+ * deterministic; the BullMQ plumbing has its own end-to-end test (jobs.test.ts).
+ *
+ * Delayed jobs (run_at in the future) are skipped unless includeDelayed is set.
+ */
+export async function runQueuedJobs({ includeDelayed = false } = {}): Promise<
+  Array<{ name: string; result: unknown }>
+> {
+  const { handlers } = await import('../src/jobs/handlers/index.js');
+  const { logger } = await import('../src/lib/logger.js');
+  const ran: Array<{ name: string; result: unknown }> = [];
+  for (;;) {
+    let q = db.selectFrom('outbox').selectAll().where('publishedAt', 'is', null);
+    if (!includeDelayed) q = q.where('runAt', '<=', sql<Date>`now()`);
+    const rows = await q.orderBy('id').execute();
+    if (!rows.length) return ran;
+
+    await db
+      .updateTable('outbox')
+      .set({ publishedAt: new Date() })
+      .where(
+        'id',
+        'in',
+        rows.map((r) => r.id),
+      )
+      .execute();
+    for (const row of rows) {
+      const queueHandlers = handlers[row.queue as keyof typeof handlers] as Record<
+        string,
+        (job: unknown, log: unknown) => Promise<unknown>
+      >;
+      const job = { id: `test-${row.id}`, name: row.jobName, data: row.payload, attemptsMade: 0, opts: {} };
+      ran.push({
+        name: `${row.queue}/${row.jobName}`,
+        result: await queueHandlers[row.jobName]!(job, logger),
+      });
+    }
+  }
 }

@@ -3,9 +3,8 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { config } from '../../config.js';
 import { db } from '../../db/index.js';
-import { passwordResetEmail } from '../../emails/templates.js';
 import { AppError, conflict, notFound, unauthorized, unprocessable } from '../../lib/errors.js';
-import { sendMail } from '../../lib/mailer.js';
+import { enqueue } from '../../jobs/outbox.js';
 import { enforce, type RateLimitRule } from '../../lib/rate-limit.js';
 import { ErrorResponse, errors, IdParams, Timestamp } from '../../lib/schemas.js';
 import { Password, toUserDto, UserDto } from '../users/dto.js';
@@ -21,7 +20,7 @@ import {
   type IssuedTokens,
   type SessionMeta,
 } from './sessions.js';
-import { hashToken, newOpaqueToken } from './tokens.js';
+import { hashToken } from './tokens.js';
 
 // ---------------------------------------------------------------------------------------
 // Refresh token transport: an httpOnly cookie. JavaScript can't read it, so an XSS bug
@@ -356,40 +355,9 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
         [LIMITS.resetEmail, email.toLowerCase()],
       ]);
 
-      const user = await db
-        .selectFrom('users')
-        .select(['id', 'email', 'name'])
-        .where('email', '=', email)
-        .executeTakeFirst();
-      if (user) {
-        const token = newOpaqueToken();
-        await db.transaction().execute(async (trx) => {
-          // Only the newest link works.
-          await trx
-            .updateTable('passwordResetTokens')
-            .set({ usedAt: new Date() })
-            .where('userId', '=', user.id)
-            .where('usedAt', 'is', null)
-            .execute();
-          await trx
-            .insertInto('passwordResetTokens')
-            .values({
-              userId: user.id,
-              tokenHash: hashToken(token),
-              expiresAt: new Date(Date.now() + config.PASSWORD_RESET_TTL_MINUTES * 60_000),
-            })
-            .execute();
-        });
-
-        // The token goes in the URL fragment (#), which browsers never send to servers, so it
-        // can't end up in access logs, proxies or Referer headers.
-        const link = `${config.APP_URL}/reset-password.html#token=${token}`;
-        // Not awaited: waiting on SMTP would make responses for real accounts measurably
-        // slower than for unknown emails. (Phase 4 moves this to a durable job queue.)
-        sendMail(passwordResetEmail(user, link, config.PASSWORD_RESET_TTL_MINUTES)).catch((err: unknown) =>
-          req.log.error({ err }, 'failed to send password reset email'),
-        );
-      }
+      // Don't look the account up here: whether it exists would show in the response time.
+      // A worker does the lookup, token and email (see jobs/handlers/email.ts).
+      await enqueue(db, 'email', 'password-reset', { email });
 
       return reply
         .status(202)

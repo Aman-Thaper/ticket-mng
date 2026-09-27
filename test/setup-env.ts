@@ -29,6 +29,8 @@ Object.assign(process.env, {
   DATABASE_URL: dbUrl,
   REDIS_URL: redisUrl,
   MAIL_TRANSPORT: 'memory',
+  // Tests upload and resize real images in MinIO, in their own bucket.
+  S3_BUCKET: process.env.TEST_S3_BUCKET ?? 'ticket-media-test',
   // Minimum argon2 cost: the hashing itself isn't under test, and OWASP parameters would
   // make every signup/login in the suite take ~25 ms.
   ARGON2_MEMORY_KIB: '1024',

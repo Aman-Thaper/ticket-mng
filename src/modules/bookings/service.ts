@@ -4,6 +4,8 @@ import { withTransaction } from '../../db/transaction.js';
 import type { Booking, DB, SeatStatus } from '../../db/types.js';
 import { AppError, conflict, notFound, unprocessable } from '../../lib/errors.js';
 import { holdAttempts } from '../../lib/metrics.js';
+import { enqueue } from '../../jobs/outbox.js';
+import { issueTickets } from '../tickets/service.js';
 import { claimSeats } from './claims.js';
 
 /*
@@ -215,8 +217,18 @@ async function createHold(
       currency: event.currency,
       expiresAt: sql<Date>`now() + make_interval(secs => ${opts.holdTtlSeconds})`,
     })
-    .returning('id')
+    .returning(['id', 'expiresAt'])
     .executeTakeFirstOrThrow();
+
+  // Release the seats the moment the hold lapses (a second later, so the hold has definitely
+  // lapsed by the database's clock). Part of this transaction, via the outbox.
+  await enqueue(
+    trx,
+    'bookings',
+    'expire-booking',
+    { bookingId: booking.id },
+    { jobId: `expire-booking_${booking.id}`, runAt: new Date(booking.expiresAt.getTime() + 1_000) },
+  );
 
   let changes: SeatChange[];
   if (seatWrite === 'versioned') {
@@ -492,6 +504,17 @@ export async function confirmBooking(
       .set({ status: 'confirmed', confirmedAt: sql`now()` })
       .where('id', '=', bookingId)
       .execute();
+
+    // Same transaction: tickets exist exactly when the booking is confirmed, and the email
+    // with the QR codes is queued only if all of this commits.
+    await issueTickets(trx, bookingId);
+    await enqueue(
+      trx,
+      'email',
+      'booking-confirmed',
+      { bookingId },
+      { jobId: `booking-confirmed_${bookingId}` },
+    );
     return { kind: 'confirmed', changes, late };
   });
 }

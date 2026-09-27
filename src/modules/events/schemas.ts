@@ -1,6 +1,15 @@
 import { z } from 'zod';
-import { EVENT_CATEGORIES, EVENT_STATUSES, SEAT_STATUSES, type EventStatus } from '../../db/types.js';
+import {
+  EVENT_CATEGORIES,
+  EVENT_STATUSES,
+  POSTER_STATUSES,
+  SEAT_STATUSES,
+  type EventStatus,
+  type PosterStatus,
+  type PosterVariants,
+} from '../../db/types.js';
 import { Limit, Timestamp, TimestampInput } from '../../lib/schemas.js';
+import { publicUrl } from '../../lib/storage.js';
 
 /** Allowed status changes. Anything not listed here is rejected with 409. */
 export const STATUS_TRANSITIONS: Record<EventStatus, readonly EventStatus[]> = {
@@ -8,6 +17,34 @@ export const STATUS_TRANSITIONS: Record<EventStatus, readonly EventStatus[]> = {
   published: ['cancelled'],
   cancelled: [],
 };
+
+export const PosterDto = z
+  .object({
+    status: z.enum(POSTER_STATUSES),
+    urls: z
+      .object({ small: z.url(), medium: z.url(), large: z.url() })
+      .nullable()
+      .describe('WebP variants 320/640/1280 px wide; null until processing finishes'),
+    error: z.string().nullable(),
+  })
+  .meta({ id: 'Poster' });
+
+export function posterDto(
+  status: PosterStatus | null,
+  variants: PosterVariants | null,
+  error: string | null,
+): z.infer<typeof PosterDto> | null {
+  if (!status) return null;
+  const urls =
+    status === 'ready' && variants?.['320'] && variants['640'] && variants['1280']
+      ? {
+          small: publicUrl(variants['320']),
+          medium: publicUrl(variants['640']),
+          large: publicUrl(variants['1280']),
+        }
+      : null;
+  return { status, urls, error };
+}
 
 export const EventDto = z
   .object({
@@ -23,6 +60,7 @@ export const EventDto = z
     salesStartAt: Timestamp.nullable().describe('When tickets go on sale; null = as soon as published'),
     maxTicketsPerUser: z.int(),
     currency: z.string(),
+    poster: PosterDto.nullable(),
     createdAt: Timestamp,
     updatedAt: Timestamp,
   })

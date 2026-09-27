@@ -17,6 +17,15 @@ export type SeatStatus = (typeof SEAT_STATUSES)[number];
 export const BOOKING_STATUSES = ['pending', 'confirmed', 'expired', 'cancelled', 'refunded'] as const;
 export type BookingStatus = (typeof BOOKING_STATUSES)[number];
 
+export const TICKET_STATUSES = ['valid', 'void'] as const;
+export type TicketStatus = (typeof TICKET_STATUSES)[number];
+
+export const POSTER_STATUSES = ['processing', 'ready', 'failed'] as const;
+export type PosterStatus = (typeof POSTER_STATUSES)[number];
+
+/** Poster width (px) → object key of the resized WebP. */
+export type PosterVariants = Record<string, string>;
+
 type CreatedAt = ColumnType<Date, never, never>;
 type UpdatedAt = ColumnType<Date, never, never>; // maintained by a trigger
 
@@ -101,6 +110,10 @@ export interface EventsTable {
   salesStartAt: Date | null;
   maxTicketsPerUser: Generated<number>;
   currency: Generated<string>;
+  posterStatus: PosterStatus | null;
+  posterKey: string | null;
+  posterVariants: ColumnType<PosterVariants | null, string | null, string | null>;
+  posterError: string | null;
   createdAt: CreatedAt;
   updatedAt: UpdatedAt;
 }
@@ -137,6 +150,40 @@ export interface BookingItemsTable {
   priceCents: number;
 }
 
+export interface TicketsTable {
+  id: Generated<string>;
+  bookingId: string;
+  eventId: string;
+  eventSeatId: number;
+  status: Generated<TicketStatus>;
+  checkedInAt: Date | null;
+  checkedInBy: string | null;
+  voidedAt: Date | null;
+  createdAt: CreatedAt;
+}
+
+export interface OutboxTable {
+  id: Generated<number>;
+  queue: string;
+  jobName: string;
+  // jsonb: inserted as a JSON string, read back as parsed JSON.
+  payload: ColumnType<Record<string, unknown>, string, string>;
+  jobId: string | null;
+  runAt: Generated<Date>;
+  requestId: string | null;
+  createdAt: CreatedAt;
+  publishedAt: Date | null;
+}
+
+export interface NotificationsTable {
+  kind: string;
+  refId: string;
+  userId: string | null;
+  status: Generated<'sending' | 'sent'>;
+  createdAt: CreatedAt;
+  sentAt: Date | null;
+}
+
 export interface DB {
   users: UsersTable;
   sessions: SessionsTable;
@@ -149,6 +196,9 @@ export interface DB {
   eventSeats: EventSeatsTable;
   bookings: BookingsTable;
   bookingItems: BookingItemsTable;
+  tickets: TicketsTable;
+  outbox: OutboxTable;
+  notifications: NotificationsTable;
 }
 
 export type User = Selectable<UsersTable>;
