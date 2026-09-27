@@ -23,6 +23,26 @@ export type TicketStatus = (typeof TICKET_STATUSES)[number];
 export const POSTER_STATUSES = ['processing', 'ready', 'failed'] as const;
 export type PosterStatus = (typeof POSTER_STATUSES)[number];
 
+export const PAYMENT_STATUSES = [
+  'requires_payment',
+  'processing',
+  'succeeded',
+  'canceled',
+  'refunded',
+] as const;
+export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
+
+export const REFUND_STATUSES = ['pending', 'succeeded', 'failed'] as const;
+export type RefundStatus = (typeof REFUND_STATUSES)[number];
+
+export const REFUND_REASONS = [
+  'requested_by_customer',
+  'event_cancelled',
+  'hold_expired',
+  'duplicate_payment',
+] as const;
+export type RefundReason = (typeof REFUND_REASONS)[number];
+
 /** Poster width (px) → object key of the resized WebP. */
 export type PosterVariants = Record<string, string>;
 
@@ -175,6 +195,54 @@ export interface OutboxTable {
   publishedAt: Date | null;
 }
 
+export interface PaymentsTable {
+  id: Generated<string>;
+  bookingId: string;
+  provider: string;
+  providerPaymentId: string | null;
+  clientSecret: string | null;
+  amountCents: number;
+  currency: string;
+  status: Generated<PaymentStatus>;
+  lastError: string | null;
+  succeededAt: Date | null;
+  refundedAt: Date | null;
+  createdAt: CreatedAt;
+  updatedAt: UpdatedAt;
+}
+
+export interface RefundsTable {
+  id: Generated<string>;
+  paymentId: string;
+  providerRefundId: string | null;
+  amountCents: number;
+  reason: RefundReason;
+  status: Generated<RefundStatus>;
+  lastError: string | null;
+  createdAt: CreatedAt;
+  updatedAt: UpdatedAt;
+  completedAt: Date | null;
+}
+
+export interface WebhookEventsTable {
+  provider: string;
+  eventId: string;
+  type: string;
+  providerPaymentId: string | null;
+  payload: ColumnType<unknown, string, string>;
+  receivedAt: Generated<Date>;
+  processedAt: Date | null;
+}
+
+export interface IdempotencyKeysTable {
+  userId: string;
+  key: string;
+  requestHash: string;
+  responseStatus: number | null;
+  responseBody: ColumnType<unknown, string | null, string | null>;
+  createdAt: Generated<Date>;
+}
+
 export interface NotificationsTable {
   kind: string;
   refId: string;
@@ -199,9 +267,14 @@ export interface DB {
   tickets: TicketsTable;
   outbox: OutboxTable;
   notifications: NotificationsTable;
+  payments: PaymentsTable;
+  refunds: RefundsTable;
+  webhookEvents: WebhookEventsTable;
+  idempotencyKeys: IdempotencyKeysTable;
 }
 
 export type User = Selectable<UsersTable>;
 export type Venue = Selectable<VenuesTable>;
 export type Event = Selectable<EventsTable>;
 export type Booking = Selectable<BookingsTable>;
+export type Payment = Selectable<PaymentsTable>;

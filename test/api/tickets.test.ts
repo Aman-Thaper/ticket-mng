@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../src/db/index.js';
 import { signTicket } from '../../src/modules/tickets/signing.js';
-import { createEvent, createUser, createVenue, publish, useApp, type TestUser } from '../helpers.js';
+import { createEvent, createUser, createVenue, payFor, publish, useApp, type TestUser } from '../helpers.js';
 
 describe('tickets and check-in', () => {
   const t = useApp();
@@ -34,7 +34,7 @@ describe('tickets and check-in', () => {
         payload: { seatIds },
       })
     ).json().id;
-    await t.app.inject({ method: 'POST', url: `/api/v1/bookings/${bookingId}/confirm`, headers: buyer.auth });
+    await payFor(t.app, buyer, bookingId);
     tickets = (
       await t.app.inject({ url: `/api/v1/bookings/${bookingId}/tickets`, headers: buyer.auth })
     ).json();

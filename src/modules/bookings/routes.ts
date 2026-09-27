@@ -1,13 +1,13 @@
 import { z } from 'zod';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { BOOKING_STATUSES } from '../../db/types.js';
-import { conflict } from '../../lib/errors.js';
+import { withIdempotency } from '../../lib/idempotency.js';
 import { decodeCursor, encodeCursor } from '../../lib/pagination.js';
 import { enforce } from '../../lib/rate-limit.js';
 import { ErrorResponse, errors, IdParams, Limit } from '../../lib/schemas.js';
 import { bearerAuth, currentUser, requireAuth } from '../auth/guard.js';
 import { assertBookingOwner, BookingDto, getBookingFor, listBookingsFor } from './queries.js';
-import { cancelPendingBooking, confirmBooking, holdSeats, type BookingOptions } from './service.js';
+import { cancelPendingBooking, holdSeats, type BookingOptions } from './service.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -29,9 +29,11 @@ export const bookingRoutes: FastifyPluginAsyncZod = async (app) => {
         summary: 'Hold seats (creates a pending booking)',
         description:
           'Reserves the seats for a limited time (HOLD_TTL_SECONDS, default 10 minutes). Unpaid holds expire and the seats return to sale. ' +
-          'Fails with 409 SEATS_UNAVAILABLE if any seat is taken, or is being booked by someone else at this moment.',
+          'Fails with 409 SEATS_UNAVAILABLE if any seat is taken, or is being booked by someone else at this moment. ' +
+          'Send an `Idempotency-Key` header to make retries safe: a repeat returns the original response.',
         security: bearerAuth,
         params: IdParams,
+        headers: z.object({ 'idempotency-key': z.string().optional() }),
         body: z.object({
           seatIds: z
             .array(z.int().positive())
@@ -46,14 +48,14 @@ export const bookingRoutes: FastifyPluginAsyncZod = async (app) => {
       const user = currentUser(req);
       await enforce(req, reply, [[HOLD_LIMIT, user.id]]);
 
-      const { bookingId } = await holdSeats(
-        { userId: user.id, eventId: req.params.id, seatIds: req.body.seatIds },
-        app.bookingOptions,
-      );
-      return reply
-        .status(201)
-        .header('location', `/api/v1/bookings/${bookingId}`)
-        .send(await getBookingFor(user, bookingId));
+      return withIdempotency(req, reply, user.id, async () => {
+        const { bookingId } = await holdSeats(
+          { userId: user.id, eventId: req.params.id, seatIds: req.body.seatIds },
+          app.bookingOptions,
+        );
+        reply.header('location', `/api/v1/bookings/${bookingId}`);
+        return { statusCode: 201, body: await getBookingFor(user, bookingId) };
+      });
     },
   );
 
@@ -106,42 +108,6 @@ export const bookingRoutes: FastifyPluginAsyncZod = async (app) => {
       },
     },
     async (req) => getBookingFor(currentUser(req), req.params.id),
-  );
-
-  app.post(
-    '/bookings/:id/confirm',
-    {
-      onRequest: requireAuth,
-      schema: {
-        tags: ['bookings'],
-        summary: 'Confirm a held booking (stand-in for payment)',
-        description:
-          'Simulates a successful payment: the hold becomes a sale and the seats become booked. Phase 5 replaces this with the payment flow.',
-        security: bearerAuth,
-        params: IdParams,
-        response: { 200: BookingDto, ...errors },
-      },
-    },
-    async (req) => {
-      const user = currentUser(req);
-      await assertBookingOwner(user, req.params.id);
-      const outcome = await confirmBooking(req.params.id);
-      switch (outcome.kind) {
-        case 'confirmed':
-        case 'already_confirmed':
-          return getBookingFor(user, req.params.id);
-        case 'hold_expired':
-        case 'seats_lost':
-          throw conflict('HOLD_EXPIRED', 'The seat hold expired before payment; please book again');
-        case 'event_unavailable':
-          throw conflict('EVENT_NOT_ON_SALE', 'This event is no longer on sale');
-        case 'not_confirmable':
-          throw conflict(
-            'BOOKING_NOT_PENDING',
-            `This booking can't be confirmed (status is ${outcome.status})`,
-          );
-      }
-    },
   );
 
   app.post(

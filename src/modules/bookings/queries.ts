@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { db } from '../../db/index.js';
-import { BOOKING_STATUSES } from '../../db/types.js';
+import { BOOKING_STATUSES, PAYMENT_STATUSES, REFUND_REASONS, REFUND_STATUSES } from '../../db/types.js';
 import { notFound } from '../../lib/errors.js';
 import { Timestamp } from '../../lib/schemas.js';
 import type { AuthUser } from '../auth/guard.js';
@@ -28,6 +28,11 @@ export const BookingDto = z
     cancelledAt: Timestamp.nullable(),
     expiredAt: Timestamp.nullable(),
     refundedAt: Timestamp.nullable(),
+    payment: z
+      .object({ id: z.uuid(), status: z.enum(PAYMENT_STATUSES), lastError: z.string().nullable() })
+      .nullable()
+      .describe('The latest payment attempt'),
+    refund: z.object({ status: z.enum(REFUND_STATUSES), reason: z.enum(REFUND_REASONS) }).nullable(),
   })
   .meta({ id: 'Booking' });
 
@@ -98,7 +103,44 @@ async function itemsFor(bookingIds: string[]) {
   return byBooking;
 }
 
-function toDto(b: BookingRow, items: BookingDtoType['items']): BookingDtoType {
+/** Latest payment attempt (and its refund, if any) per booking. */
+async function paymentsFor(bookingIds: string[]) {
+  const byBooking = new Map<string, Pick<BookingDtoType, 'payment' | 'refund'>>();
+  if (!bookingIds.length) return byBooking;
+  const rows = await db
+    .selectFrom('payments as p')
+    .leftJoin('refunds as r', (join) => join.onRef('r.paymentId', '=', 'p.id').on('r.status', '<>', 'failed'))
+    .select([
+      'p.bookingId',
+      'p.id',
+      'p.status',
+      'p.lastError',
+      'r.status as refundStatus',
+      'r.reason as refundReason',
+    ])
+    .where('p.bookingId', 'in', bookingIds)
+    .orderBy('p.createdAt', 'asc')
+    .execute();
+  for (const r of rows) {
+    // Ascending order, so later payments overwrite earlier ones: the latest attempt wins.
+    // A refund stays visible even if a later attempt has none.
+    const previousRefund = byBooking.get(r.bookingId)?.refund ?? null;
+    byBooking.set(r.bookingId, {
+      payment: { id: r.id, status: r.status, lastError: r.lastError },
+      refund:
+        r.refundStatus && r.refundReason
+          ? { status: r.refundStatus, reason: r.refundReason }
+          : previousRefund,
+    });
+  }
+  return byBooking;
+}
+
+function toDto(
+  b: BookingRow,
+  items: BookingDtoType['items'],
+  money: Pick<BookingDtoType, 'payment' | 'refund'> | undefined,
+): BookingDtoType {
   return {
     id: b.id,
     status: b.status,
@@ -118,6 +160,8 @@ function toDto(b: BookingRow, items: BookingDtoType['items']): BookingDtoType {
     cancelledAt: iso(b.cancelledAt),
     expiredAt: iso(b.expiredAt),
     refundedAt: iso(b.refundedAt),
+    payment: money?.payment ?? null,
+    refund: money?.refund ?? null,
   };
 }
 
@@ -127,8 +171,8 @@ export async function getBookingFor(viewer: AuthUser, bookingId: string): Promis
   const visible =
     booking && (viewer.role === 'admin' || booking.userId === viewer.id || booking.organizerId === viewer.id);
   if (!visible) throw notFound('Booking');
-  const items = await itemsFor([booking.id]);
-  return toDto(booking, items.get(booking.id) ?? []);
+  const [items, money] = await Promise.all([itemsFor([booking.id]), paymentsFor([booking.id])]);
+  return toDto(booking, items.get(booking.id) ?? [], money.get(booking.id));
 }
 
 /** The owner-only check used before mutating a booking (confirm, cancel, pay). */
@@ -155,9 +199,10 @@ export async function listBookingsFor(
 
   const hasMore = rows.length > opts.limit;
   const page = hasMore ? rows.slice(0, opts.limit) : rows;
-  const items = await itemsFor(page.map((b) => b.id));
+  const ids = page.map((b) => b.id);
+  const [items, money] = await Promise.all([itemsFor(ids), paymentsFor(ids)]);
   return {
-    data: page.map((b) => toDto(b, items.get(b.id) ?? [])),
+    data: page.map((b) => toDto(b, items.get(b.id) ?? [], money.get(b.id))),
     last: hasMore ? page.at(-1) : undefined,
   };
 }

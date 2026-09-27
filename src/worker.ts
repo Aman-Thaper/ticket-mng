@@ -22,6 +22,7 @@ import { ensureBucket } from './lib/storage.js';
 const workers = [
   createWorker('email', handlers.email, 10),
   createWorker('bookings', handlers.bookings, 20),
+  createWorker('payments', handlers.payments, 10),
   createWorker('media', handlers.media, 2),
   createWorker('maintenance', handlers.maintenance, 1),
 ];

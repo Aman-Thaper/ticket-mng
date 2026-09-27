@@ -117,3 +117,42 @@ export function eventReminderEmail(
     ),
   };
 }
+
+const REFUND_TEXT: Record<string, (event: string, amount: string) => { subject: string; body: string }> = {
+  requested_by_customer: (event, amount) => ({
+    subject: `Refund processed: ${event}`,
+    body: `Your refund of ${amount} for ${event} has been processed. Your tickets are no longer valid.`,
+  }),
+  event_cancelled: (event, amount) => ({
+    subject: `Cancelled: ${event}`,
+    body: `We're sorry: ${event} has been cancelled. We've refunded your ${amount}.`,
+  }),
+  hold_expired: (event, amount) => ({
+    subject: `Payment refunded: ${event}`,
+    body: `Your payment of ${amount} for ${event} came through after your seat reservation had ended, and the seats were no longer available. We've refunded it in full.`,
+  }),
+  duplicate_payment: (event, amount) => ({
+    subject: `Duplicate payment refunded: ${event}`,
+    body: `You were charged twice for the same booking for ${event}. We've refunded the extra ${amount}.`,
+  }),
+};
+
+export function refundProcessedEmail(
+  to: { email: string; name: string },
+  refund: { reason: string; amountCents: number; currency: string; eventTitle: string },
+): Mail {
+  const amount = money(refund.amountCents, refund.currency);
+  const { subject, body } = (REFUND_TEXT[refund.reason] ?? REFUND_TEXT.requested_by_customer!)(
+    refund.eventTitle,
+    amount,
+  );
+  return {
+    to: to.email,
+    subject,
+    text: `Hi ${to.name},\n\n${body}\n\nIt can take 5–10 business days to show on your statement.`,
+    html: layout(
+      subject,
+      `<p>Hi ${escape(to.name)},</p><p>${escape(body)}</p><p style="font-size:13px;color:#52525b">It can take 5–10 business days to show on your statement.</p>`,
+    ),
+  };
+}

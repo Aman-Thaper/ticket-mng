@@ -75,6 +75,11 @@ export const cleanup: JobHandler<Jobs['maintenance']['cleanup']> = async (_job, 
       'password_reset_tokens',
       sql`expires_at < now() - interval '1 day'`,
     ),
+    idempotencyKeys: await deleteInBatches('idempotency_keys', sql`created_at < now() - interval '24 hours'`),
+    webhookEvents: await deleteInBatches(
+      'webhook_events',
+      sql`processed_at IS NOT NULL AND received_at < now() - interval '30 days'`,
+    ),
     sessions: await deleteInBatches(
       'sessions',
       sql`(revoked_at < now() - interval '30 days') OR (expires_at < now() - interval '1 day')`,

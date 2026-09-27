@@ -20,6 +20,8 @@ import { healthRoutes } from './modules/health/routes.js';
 import { userRoutes } from './modules/users/routes.js';
 import { venueRoutes } from './modules/venues/routes.js';
 import { eventRoutes } from './modules/events/routes.js';
+import { paymentRoutes } from './modules/payments/routes.js';
+import { fakeGatewayRoutes } from './fake-gateway/routes.js';
 import { posterRoutes } from './modules/events/posters.js';
 import { ticketRoutes } from './modules/tickets/routes.js';
 
@@ -64,6 +66,7 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
         { name: 'auth', description: 'Signup, login, token refresh, sessions and passwords' },
         { name: 'events', description: 'Events, search and seat maps' },
         { name: 'bookings', description: 'Seat holds and bookings' },
+        { name: 'payments', description: 'Payments, refunds and provider webhooks' },
         { name: 'tickets', description: 'QR tickets and check-in' },
         { name: 'venues', description: 'Venues and their seat layouts' },
         { name: 'users', description: 'Profiles and roles' },
@@ -89,6 +92,8 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
   );
 
   await app.register(healthRoutes);
+  // The simulated payment provider's browser API (dev and test only; refused in production).
+  if (config.PAYMENT_PROVIDER === 'fake') await app.register(fakeGatewayRoutes);
   await app.register(
     async (api) => {
       await api.register(authRoutes);
@@ -97,6 +102,7 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
       await api.register(eventRoutes);
       await api.register(posterRoutes);
       await api.register(bookingRoutes);
+      await api.register(paymentRoutes);
       await api.register(ticketRoutes);
       await api.register(adminRoutes);
     },

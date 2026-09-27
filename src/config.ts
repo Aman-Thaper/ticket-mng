@@ -55,6 +55,22 @@ const schema = z.object({
   /** Redis fast-path that turns away concurrent attempts on the same seat before they reach Postgres. */
   CLAIM_GATE_ENABLED: bool.default(true),
 
+  // ---- payments
+  /**
+   * 'fake' is a built-in simulated payment gateway (Stripe-shaped: payment intents, signed
+   * webhooks) so everything runs offline. 'stripe' uses Stripe in test mode.
+   */
+  PAYMENT_PROVIDER: z.enum(['fake', 'stripe']).default('fake'),
+  STRIPE_SECRET_KEY: z.string().startsWith('sk_').optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().startsWith('whsec_').optional(),
+  FAKE_GATEWAY_WEBHOOK_SECRET: z.string().min(16).default('whsec_fake_gateway_dev_only_secret'),
+  /** Where the fake gateway delivers its webhooks. Defaults to this app's webhook endpoint. */
+  FAKE_GATEWAY_WEBHOOK_URL: z.url().optional(),
+  /** Deliver every fake webhook twice, with random delays (duplicates + out of order). */
+  FAKE_GATEWAY_CHAOS: bool.default(false),
+  /** Buyers can ask for a refund until this many hours before the event starts. */
+  REFUND_CUTOFF_HOURS: z.coerce.number().int().min(0).default(24),
+
   // ---- tickets
   /**
    * Ed25519 private key seed (32 bytes, base64) that signs ticket QR codes. Scanners only
@@ -112,6 +128,18 @@ if (
     COMMITTED_DEV_SECRETS.has(parsed.data.TICKET_SIGNING_KEY))
 ) {
   console.error('Refusing to start: a development secret from .env.example is configured in production');
+  process.exit(1);
+}
+
+if (
+  parsed.data.PAYMENT_PROVIDER === 'stripe' &&
+  (!parsed.data.STRIPE_SECRET_KEY || !parsed.data.STRIPE_WEBHOOK_SECRET)
+) {
+  console.error('PAYMENT_PROVIDER=stripe needs STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET');
+  process.exit(1);
+}
+if (parsed.data.NODE_ENV === 'production' && parsed.data.PAYMENT_PROVIDER === 'fake') {
+  console.error('The fake payment gateway accepts any test card; it is not allowed in production');
   process.exit(1);
 }
 

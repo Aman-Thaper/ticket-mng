@@ -5,6 +5,7 @@ import {
   bookingConfirmedEmail,
   eventReminderEmail,
   passwordResetEmail,
+  refundProcessedEmail,
   type BookingForEmail,
 } from '../../emails/templates.js';
 import { sendMail } from '../../lib/mailer.js';
@@ -170,6 +171,30 @@ export const eventReminder: JobHandler<Jobs['email']['event-reminder']> = async 
     .map((t) => `${t.section}, row ${t.row}, seat ${t.number}`);
   const outcome = await sendOnce('event-reminder', booking.id, booking.userId, () =>
     sendMail(eventReminderEmail(booking, forEmail(booking), seats)),
+  );
+  return { outcome };
+};
+
+export const refundProcessed: JobHandler<Jobs['email']['refund-processed']> = async (job) => {
+  const refund = await db
+    .selectFrom('refunds as r')
+    .innerJoin('payments as p', 'p.id', 'r.paymentId')
+    .innerJoin('bookings as b', 'b.id', 'p.bookingId')
+    .innerJoin('users as u', 'u.id', 'b.userId')
+    .innerJoin('events as e', 'e.id', 'b.eventId')
+    .select(['r.id', 'r.reason', 'r.amountCents', 'p.currency', 'b.userId', 'u.email', 'u.name', 'e.title'])
+    .where('r.id', '=', job.data.refundId)
+    .executeTakeFirst();
+  if (!refund) return { sent: false };
+  const outcome = await sendOnce('refund-processed', refund.id, refund.userId, () =>
+    sendMail(
+      refundProcessedEmail(refund, {
+        reason: refund.reason,
+        amountCents: refund.amountCents,
+        currency: refund.currency.trim(),
+        eventTitle: refund.title,
+      }),
+    ),
   );
   return { outcome };
 };

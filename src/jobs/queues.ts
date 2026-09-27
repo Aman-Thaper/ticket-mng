@@ -11,6 +11,12 @@ export interface Jobs {
     'password-reset': { email: string };
     'booking-confirmed': { bookingId: string };
     'event-reminder': { bookingId: string };
+    'refund-processed': { refundId: string };
+  };
+  payments: {
+    'process-webhook': { provider: string; eventId: string };
+    refund: { refundId: string };
+    'refund-event': { eventId: string };
   };
   bookings: {
     'expire-booking': { bookingId: string };
@@ -32,6 +38,7 @@ export type JobData<Q extends QueueName, N extends JobName<Q>> = Jobs[Q][N];
 export const QUEUE_NAMES = [
   'email',
   'bookings',
+  'payments',
   'media',
   'maintenance',
 ] as const satisfies readonly QueueName[];

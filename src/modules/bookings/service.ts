@@ -1,11 +1,11 @@
 import { sql, type Kysely, type Transaction } from 'kysely';
 import { db } from '../../db/index.js';
 import { withTransaction } from '../../db/transaction.js';
-import type { Booking, DB, SeatStatus } from '../../db/types.js';
+import type { Booking, DB, EventStatus, SeatStatus } from '../../db/types.js';
 import { AppError, conflict, notFound, unprocessable } from '../../lib/errors.js';
 import { holdAttempts } from '../../lib/metrics.js';
 import { enqueue } from '../../jobs/outbox.js';
-import { issueTickets } from '../tickets/service.js';
+import { issueTickets, voidTickets } from '../tickets/service.js';
 import { claimSeats } from './claims.js';
 
 /*
@@ -393,7 +393,7 @@ export async function holdSeats(
  * Lock a booking's seats (ascending id) and then the booking itself: the global lock order.
  * Returns the seats (with acquirability) and the booking.
  */
-async function lockBooking(trx: Transaction<DB>, bookingId: string) {
+export async function lockBooking(trx: Transaction<DB>, bookingId: string) {
   const items = await trx
     .selectFrom('bookingItems')
     .select('eventSeatId')
@@ -439,84 +439,125 @@ export type ConfirmOutcome =
   | { kind: 'already_confirmed' }
   | { kind: 'hold_expired' }
   | { kind: 'seats_lost' }
-  | { kind: 'event_unavailable' }
+  | { kind: 'event_unavailable'; eventStatus: EventStatus }
   | { kind: 'not_confirmable'; status: Booking['status'] };
 
 /**
- * Turn a hold into a sale. `lateAllowed` is for payments: money has already moved, so if the
- * hold lapsed but the seats are still free, take them back rather than refund.
+ * Turn a hold into a sale, inside the caller's transaction (the payment flow also records
+ * the payment in the same transaction). `lateAllowed` is for payments: money has already
+ * moved, so if the hold lapsed but the seats are still free, take them back rather than refund.
  */
-export async function confirmBooking(
+export async function confirmBookingInTx(
+  trx: Transaction<DB>,
   bookingId: string,
   { lateAllowed = false } = {},
 ): Promise<ConfirmOutcome> {
-  return withTransaction(async (trx) => {
-    const { seats, booking, seatIds } = await lockBooking(trx, bookingId);
-    if (!booking) throw notFound('Booking');
-    if (booking.status === 'confirmed') return { kind: 'already_confirmed' };
+  const { seats, booking, seatIds } = await lockBooking(trx, bookingId);
+  if (!booking) throw notFound('Booking');
+  if (booking.status === 'confirmed') return { kind: 'already_confirmed' };
 
-    const event = await trx
-      .selectFrom('events')
-      .select(['status', 'startsAt'])
-      .where('id', '=', booking.eventId)
-      .executeTakeFirstOrThrow();
-    if (event.status !== 'published' || event.startsAt <= new Date()) return { kind: 'event_unavailable' };
+  const event = await trx
+    .selectFrom('events')
+    .select(['status', 'startsAt'])
+    .where('id', '=', booking.eventId)
+    .executeTakeFirstOrThrow();
+  if (event.status !== 'published' || event.startsAt <= new Date())
+    return { kind: 'event_unavailable', eventStatus: event.status };
 
-    const stillOurs = seats.every((s) => s.bookingId === bookingId && s.status === 'held');
-    const lapsed = booking.lapsed;
+  const stillOurs = seats.every((s) => s.bookingId === bookingId && s.status === 'held');
+  const lapsed = booking.lapsed;
 
-    let late: boolean;
-    if (booking.status === 'pending' && stillOurs) {
-      if (lapsed && !lateAllowed) {
-        await trx
-          .updateTable('bookings')
-          .set({ status: 'expired', expiredAt: sql`now()` })
-          .where('id', '=', bookingId)
-          .execute();
-        await releaseSeats(trx, bookingId);
-        return { kind: 'hold_expired' };
-      }
-      late = lapsed;
-    } else if (
-      booking.status === 'pending' ||
-      booking.status === 'expired' ||
-      booking.status === 'cancelled'
-    ) {
-      // The hold is gone. Only a payment may try to win the seats back.
-      if (!lateAllowed)
-        return booking.status === 'cancelled'
-          ? { kind: 'not_confirmable', status: booking.status }
-          : { kind: 'hold_expired' };
-      if (!seats.every((s) => s.bookingId === bookingId || s.acquirable)) return { kind: 'seats_lost' };
-      late = true;
-    } else {
-      return { kind: 'not_confirmable', status: booking.status };
+  let late: boolean;
+  if (booking.status === 'pending' && stillOurs) {
+    if (lapsed && !lateAllowed) {
+      await trx
+        .updateTable('bookings')
+        .set({ status: 'expired', expiredAt: sql`now()` })
+        .where('id', '=', bookingId)
+        .execute();
+      await releaseSeats(trx, bookingId);
+      return { kind: 'hold_expired' };
     }
+    late = lapsed;
+  } else if (booking.status === 'pending' || booking.status === 'expired' || booking.status === 'cancelled') {
+    // The hold is gone. Only a payment may try to win the seats back.
+    if (!lateAllowed)
+      return booking.status === 'cancelled'
+        ? { kind: 'not_confirmable', status: booking.status }
+        : { kind: 'hold_expired' };
+    if (!seats.every((s) => s.bookingId === bookingId || s.acquirable)) return { kind: 'seats_lost' };
+    // Seats now pointing at other lapsed holds: those holds are over.
+    const lapsedHolders = [
+      ...new Set(seats.map((s) => s.bookingId).filter((id): id is string => !!id && id !== bookingId)),
+    ];
+    if (lapsedHolders.length) {
+      await trx
+        .updateTable('bookings')
+        .set({ status: 'expired', expiredAt: sql`now()` })
+        .where('id', 'in', lapsedHolders)
+        .where('status', '=', 'pending')
+        .execute();
+    }
+    late = true;
+  } else {
+    return { kind: 'not_confirmable', status: booking.status };
+  }
 
-    const changes = await trx
-      .updateTable('eventSeats')
-      .set({ status: 'booked', bookingId, version: sql`version + 1` })
-      .where('id', 'in', seatIds)
-      .returning(['id', 'status', 'version'])
-      .execute();
-    await trx
-      .updateTable('bookings')
-      .set({ status: 'confirmed', confirmedAt: sql`now()` })
-      .where('id', '=', bookingId)
-      .execute();
+  const changes = await trx
+    .updateTable('eventSeats')
+    .set({ status: 'booked', bookingId, version: sql`version + 1` })
+    .where('id', 'in', seatIds)
+    .returning(['id', 'status', 'version'])
+    .execute();
+  await trx
+    .updateTable('bookings')
+    .set({ status: 'confirmed', confirmedAt: sql`now()` })
+    .where('id', '=', bookingId)
+    .execute();
 
-    // Same transaction: tickets exist exactly when the booking is confirmed, and the email
-    // with the QR codes is queued only if all of this commits.
-    await issueTickets(trx, bookingId);
-    await enqueue(
-      trx,
-      'email',
-      'booking-confirmed',
-      { bookingId },
-      { jobId: `booking-confirmed_${bookingId}` },
-    );
-    return { kind: 'confirmed', changes, late };
-  });
+  // Same transaction: tickets exist exactly when the booking is confirmed, and the email
+  // with the QR codes is queued only if all of this commits.
+  await issueTickets(trx, bookingId);
+  await enqueue(
+    trx,
+    'email',
+    'booking-confirmed',
+    { bookingId },
+    { jobId: `booking-confirmed_${bookingId}` },
+  );
+  return { kind: 'confirmed', changes, late };
+}
+
+export function confirmBooking(
+  bookingId: string,
+  opts: { lateAllowed?: boolean } = {},
+): Promise<ConfirmOutcome> {
+  return withTransaction((trx) => confirmBookingInTx(trx, bookingId, opts));
+}
+
+/**
+ * End a confirmed booking: its seats go back on sale and its tickets stop working. Used when
+ * a refund completes ('refunded') and for unpaid (free) bookings of a cancelled event
+ * ('cancelled'). Runs in the caller's transaction, locking seats then the booking.
+ */
+export async function endConfirmedBookingInTx(
+  trx: Transaction<DB>,
+  bookingId: string,
+  to: 'refunded' | 'cancelled',
+): Promise<SeatChange[]> {
+  const { booking } = await lockBooking(trx, bookingId);
+  if (!booking || booking.status !== 'confirmed') return [];
+  await trx
+    .updateTable('bookings')
+    .set(
+      to === 'refunded'
+        ? { status: 'refunded', refundedAt: sql`now()` }
+        : { status: 'cancelled', cancelledAt: sql`now()` },
+    )
+    .where('id', '=', bookingId)
+    .execute();
+  await voidTickets(trx, bookingId);
+  return releaseSeats(trx, bookingId);
 }
 
 /** Cancel a pending booking (the buyer walks away) and release its seats. */

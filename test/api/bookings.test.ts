@@ -3,7 +3,16 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../src/app.js';
 import { db } from '../../src/db/index.js';
 import { confirmBooking, expireBooking, type HoldStrategy } from '../../src/modules/bookings/service.js';
-import { createEvent, createUser, createVenue, inDays, publish, useApp, type TestUser } from '../helpers.js';
+import {
+  createEvent,
+  createUser,
+  createVenue,
+  inDays,
+  payFor,
+  publish,
+  useApp,
+  type TestUser,
+} from '../helpers.js';
 
 describe('bookings', () => {
   const t = useApp();
@@ -135,11 +144,7 @@ describe('bookings', () => {
       );
 
       const first = (await hold(buyer, limited.seatIds.slice(0, 2), limited.id)).json();
-      await t.app.inject({
-        method: 'POST',
-        url: `/api/v1/bookings/${first.id}/confirm`,
-        headers: buyer.auth,
-      });
+      await payFor(t.app, buyer, first.id);
       const more = await hold(buyer, [limited.seatIds[2]!], limited.id);
       expect(more.json().error).toMatchObject({
         code: 'TICKET_LIMIT_EXCEEDED',
@@ -186,36 +191,38 @@ describe('bookings', () => {
     });
   });
 
-  describe('confirm and cancel', () => {
-    it('confirms a hold: seats become booked; confirming again is a no-op', async () => {
+  describe('pay and cancel', () => {
+    it('paying confirms the hold and books the seats; it cannot be paid twice', async () => {
       const booking = (await hold(buyer, [seatIds[0]!])).json();
-      const confirm = () =>
-        t.app.inject({ method: 'POST', url: `/api/v1/bookings/${booking.id}/confirm`, headers: buyer.auth });
+      await payFor(t.app, buyer, booking.id);
 
-      const res = await confirm();
-      expect(res.json()).toMatchObject({ status: 'confirmed', confirmedAt: expect.any(String) });
+      const after = (
+        await t.app.inject({ url: `/api/v1/bookings/${booking.id}`, headers: buyer.auth })
+      ).json();
+      expect(after).toMatchObject({
+        status: 'confirmed',
+        confirmedAt: expect.any(String),
+        payment: { status: 'succeeded' },
+      });
       expect(await seatStatus(seatIds[0]!)).toMatchObject({ status: 'booked' });
-      expect((await confirm()).json().status).toBe('confirmed');
+
+      const again = await t.app.inject({
+        method: 'POST',
+        url: `/api/v1/bookings/${booking.id}/payment`,
+        headers: buyer.auth,
+      });
+      expect(again.json().error.code).toBe('BOOKING_NOT_PENDING');
     });
 
-    it('refuses to confirm a lapsed hold and releases its seats', async () => {
+    it('refuses to start paying for a lapsed hold', async () => {
       const booking = (await hold(buyer, [seatIds[0]!])).json();
       await lapse(booking.id);
       const res = await t.app.inject({
         method: 'POST',
-        url: `/api/v1/bookings/${booking.id}/confirm`,
+        url: `/api/v1/bookings/${booking.id}/payment`,
         headers: buyer.auth,
       });
       expect(res.json().error.code).toBe('HOLD_EXPIRED');
-      expect(
-        (
-          await db
-            .selectFrom('eventSeats')
-            .select('status')
-            .where('id', '=', seatIds[0]!)
-            .executeTakeFirstOrThrow()
-        ).status,
-      ).toBe('available');
     });
 
     it('cancels a pending booking and frees its seats; paid bookings need a refund instead', async () => {
@@ -238,7 +245,7 @@ describe('bookings', () => {
       expect((await view(await createUser('admin'))).statusCode).toBe(200);
       const hijack = await t.app.inject({
         method: 'POST',
-        url: `/api/v1/bookings/${booking.id}/confirm`,
+        url: `/api/v1/bookings/${booking.id}/payment`,
         headers: stranger.auth,
       });
       expect(hijack.statusCode).toBe(404);

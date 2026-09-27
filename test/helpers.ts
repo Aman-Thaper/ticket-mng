@@ -2,6 +2,7 @@ import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
+import { configureDelivery } from '../src/fake-gateway/gateway.js';
 import { db } from '../src/db/index.js';
 import type { UserRole } from '../src/db/types.js';
 import { sentMail } from '../src/lib/mailer.js';
@@ -16,6 +17,14 @@ export function useApp() {
   beforeAll(async () => {
     ctx.app = await buildApp({ logger: false });
     await ctx.app.ready();
+    // The fake payment gateway delivers its signed webhooks straight into this app, and
+    // synchronously, so a test knows the webhook has landed when the payment call returns.
+    configureDelivery({
+      mode: 'sync',
+      deliverer: async (body, headers) =>
+        (await ctx.app.inject({ method: 'POST', url: '/api/v1/webhooks/fake', payload: body, headers }))
+          .statusCode,
+    });
   });
   beforeEach(async () => {
     await resetState();
@@ -178,4 +187,38 @@ export async function runQueuedJobs({ includeDelayed = false } = {}): Promise<
       });
     }
   }
+}
+
+export const TEST_CARDS = {
+  ok: '4242424242424242',
+  declined: '4000000000000002',
+  insufficientFunds: '4000000000009995',
+  slow: '4000000000000077',
+} as const;
+
+/**
+ * Pay for a booking the way a browser would: create the payment, pay at the (fake) provider
+ * with a test card, let the signed webhook arrive, then run the queued jobs. Everything
+ * between "card charged" and "booking confirmed" runs through the real code paths.
+ */
+export async function payFor(
+  app: FastifyInstance,
+  user: TestUser,
+  bookingId: string,
+  card: string = TEST_CARDS.ok,
+) {
+  const res = await app.inject({
+    method: 'POST',
+    url: `/api/v1/bookings/${bookingId}/payment`,
+    headers: user.auth,
+  });
+  if (res.statusCode >= 300) throw new Error(`payment start failed: ${res.body}`);
+  const payment = res.json<{ id: string; providerPaymentId: string; clientSecret: string }>();
+  const gateway = await app.inject({
+    method: 'POST',
+    url: `/fake-gateway/v1/payment_intents/${payment.providerPaymentId}/confirm`,
+    payload: { clientSecret: payment.clientSecret, cardNumber: card },
+  });
+  const jobs = await runQueuedJobs();
+  return { payment, gateway, jobs };
 }

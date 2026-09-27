@@ -3,6 +3,7 @@ import { sql, type Kysely, type Transaction } from 'kysely';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { db } from '../../db/index.js';
 import { withTransaction } from '../../db/transaction.js';
+import { enqueue } from '../../jobs/outbox.js';
 import type { DB, SeatStatus } from '../../db/types.js';
 import { AppError, conflict, forbidden, notFound, unauthorized, unprocessable } from '../../lib/errors.js';
 import { acquirableSql, cancelPendingBookingsForEvent } from '../bookings/service.js';
@@ -352,9 +353,12 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
             .where('id', '=', id)
             .execute();
 
-          // Cancelling the event voids every seat hold on it. (Paid bookings are refunded by
-          // the payments flow.)
-          if (patch.status === 'cancelled') await cancelPendingBookingsForEvent(trx, id);
+          // Cancelling the event voids every seat hold on it, and queues refunds for every paid
+          // booking (a job, since a big show can have thousands).
+          if (patch.status === 'cancelled') {
+            await cancelPendingBookingsForEvent(trx, id);
+            await enqueue(trx, 'payments', 'refund-event', { eventId: id }, { jobId: `refund-event_${id}` });
+          }
         });
       } catch (err) {
         if (isVenueOverlap(err)) throw venueOverlap();

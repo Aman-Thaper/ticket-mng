@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../src/app.js';
 import { db } from '../../src/db/index.js';
 import { withTransaction } from '../../src/db/transaction.js';
+import { confirmBooking } from '../../src/modules/bookings/service.js';
 import { handlers } from '../../src/jobs/handlers/index.js';
 import { cleanup, sendEventReminders } from '../../src/jobs/handlers/maintenance.js';
 import { bookingConfirmed, eventReminder } from '../../src/jobs/handlers/email.js';
@@ -49,8 +50,8 @@ describe('background jobs', () => {
       headers: user.auth,
       payload: { seatIds: seats },
     });
-  const confirm = (bookingId: string) =>
-    t.app.inject({ method: 'POST', url: `/api/v1/bookings/${bookingId}/confirm`, headers: buyer.auth });
+  // Confirm directly (no payment) so these tests exercise the jobs, not the payment flow.
+  const confirm = (bookingId: string) => confirmBooking(bookingId);
 
   beforeEach(async () => {
     [organizer, buyer] = await Promise.all([createUser('organizer'), createUser('attendee')]);
