@@ -15,11 +15,36 @@ const schema = z.object({
   HOST: z.string().default('0.0.0.0'),
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  /** Identifies this process in logs and the x-served-by header (defaults to host:pid). */
+  INSTANCE_ID: z.string().optional(),
+  /**
+   * Which proxies may set X-Forwarded-For. Behind Nginx on the same host use "loopback";
+   * otherwise the proxy's address/CIDR, or a hop count. Never "true" on the open internet:
+   * clients could then fake their IP and dodge per-IP rate limits.
+   */
+  TRUST_PROXY: z
+    .string()
+    .default('false')
+    .transform((v) => (v === 'true' ? true : v === 'false' ? false : /^\d+$/.test(v) ? Number(v) : v)),
+  /** In-process micro-cache TTL for hot, fast-changing reads (seat maps, availability). */
+  MICRO_CACHE_TTL_MS: z.coerce.number().int().min(0).default(1_000),
+  /** Per-client-IP limit on the whole API: bursts of CAPACITY, sustained REFILL per second. */
+  RATE_LIMIT_ENABLED: bool.default(true),
+  RATE_LIMIT_IP_CAPACITY: z.coerce.number().int().positive().default(120),
+  RATE_LIMIT_IP_REFILL_PER_SEC: z.coerce.number().positive().default(30),
   /** Public base URL of the app, used for links in emails. */
   APP_URL: z.url().default('http://localhost:3000'),
 
   DATABASE_URL: z.string().min(1),
+  /**
+   * Connections per process. Sum across every process must stay under Postgres'
+   * max_connections (100 by default): e.g. 3 API × 20 + 1 worker × 10 + listener ≈ 71.
+   */
   DB_POOL_MAX: z.coerce.number().int().positive().default(10),
+  /** How long a request waits for a free pool connection before failing with 503. */
+  DB_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
+  /** Postgres cancels any single statement running longer than this. */
+  DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
   REDIS_URL: z.string().min(1).default('redis://localhost:6379'),
 
   // ---- auth

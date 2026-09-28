@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { db } from '../db/index.js';
 import { AppError } from './errors.js';
+import { stableStringify } from './json.js';
 
 /*
  * Idempotency-Key, Stripe style. A client that times out doesn't know whether its POST went
@@ -19,14 +20,6 @@ import { AppError } from './errors.js';
  */
 
 const STALE_MS = 60_000;
-
-/** JSON with sorted keys, so {a,b} and {b,a} hash the same. */
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
-}
 
 export interface HandlerResult<T> {
   statusCode: number;

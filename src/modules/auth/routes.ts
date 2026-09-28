@@ -31,12 +31,24 @@ import { hashToken } from './tokens.js';
 const REFRESH_COOKIE = 'refresh_token';
 const COOKIE_PATH = '/api/v1/auth';
 
+// A companion cookie with no secret in it, readable by JavaScript. The refresh cookie is
+// httpOnly, so a page can't tell whether a session exists. Without this hint it would
+// have to call /auth/refresh on every load and get a 401 for every logged-out visitor.
+const SESSION_HINT_COOKIE = 'has_session';
+
 function setRefreshCookie(reply: FastifyReply, tokens: IssuedTokens) {
   reply.setCookie(REFRESH_COOKIE, tokens.refreshToken, {
     httpOnly: true,
     secure: config.COOKIE_SECURE,
     sameSite: 'strict',
     path: COOKIE_PATH,
+    expires: tokens.refreshExpiresAt,
+  });
+  reply.setCookie(SESSION_HINT_COOKIE, '1', {
+    httpOnly: false,
+    secure: config.COOKIE_SECURE,
+    sameSite: 'strict',
+    path: '/',
     expires: tokens.refreshExpiresAt,
   });
 }
@@ -48,6 +60,7 @@ function clearRefreshCookie(reply: FastifyReply) {
     secure: config.COOKIE_SECURE,
     sameSite: 'strict',
   });
+  reply.clearCookie(SESSION_HINT_COOKIE, { path: '/', secure: config.COOKIE_SECURE, sameSite: 'strict' });
 }
 
 const meta = (req: FastifyRequest): SessionMeta => ({ userAgent: req.headers['user-agent'], ip: req.ip });

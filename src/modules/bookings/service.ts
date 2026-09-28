@@ -1,11 +1,12 @@
 import { sql, type Kysely, type Transaction } from 'kysely';
 import { db } from '../../db/index.js';
 import { withTransaction } from '../../db/transaction.js';
-import type { Booking, DB, EventStatus, SeatStatus } from '../../db/types.js';
+import type { Booking, DB, EventStatus } from '../../db/types.js';
 import { AppError, conflict, notFound, unprocessable } from '../../lib/errors.js';
 import { holdAttempts } from '../../lib/metrics.js';
 import { enqueue } from '../../jobs/outbox.js';
 import { issueTickets, voidTickets } from '../tickets/service.js';
+import { notifySeatChanges, type SeatChange } from '../../realtime/seat-updates.js';
 import { claimSeats } from './claims.js';
 
 /*
@@ -53,11 +54,12 @@ export interface BookingOptions {
 
 type Conn = Kysely<DB> | Transaction<DB>;
 
-/** A seat change, reported so it can be broadcast to live seat maps. */
-export interface SeatChange {
-  id: number;
-  status: SeatStatus;
-  version: number;
+export type { SeatChange } from '../../realtime/seat-updates.js';
+
+/** Every seat mutation passes its RETURNING rows through here: broadcast after commit. */
+function changed(changes: SeatChange[]): SeatChange[] {
+  notifySeatChanges(changes);
+  return changes;
 }
 
 // ─── shared queries ──────────────────────────────────────────────────────────────────────
@@ -114,12 +116,14 @@ function assertAcquirable(rows: SeatRow[]) {
 
 /** Release every seat still pointing at this booking. Idempotent. */
 async function releaseSeats(trx: Transaction<DB>, bookingId: string): Promise<SeatChange[]> {
-  return trx
-    .updateTable('eventSeats')
-    .set({ status: 'available', bookingId: null, version: sql`version + 1` })
-    .where('bookingId', '=', bookingId)
-    .returning(['id', 'status', 'version'])
-    .execute();
+  return changed(
+    await trx
+      .updateTable('eventSeats')
+      .set({ status: 'available', bookingId: null, version: sql`version + 1` })
+      .where('bookingId', '=', bookingId)
+      .returning(['id', 'eventId', 'status', 'version'])
+      .execute(),
+  );
 }
 
 // ─── placing a hold ──────────────────────────────────────────────────────────────────────
@@ -166,35 +170,50 @@ async function loadSaleableEvent(eventId: string, seatCount: number): Promise<Sa
  *  - the ticket limit counts seats in this user's confirmed bookings.
  */
 async function checkUserLimits(req: HoldRequest, event: SaleableEvent) {
-  const pending = await db
-    .selectFrom('bookings')
-    .select(['id', sql<boolean>`expires_at <= now()`.as('lapsed')])
-    .where('userId', '=', req.userId)
-    .where('eventId', '=', req.eventId)
-    .where('status', '=', 'pending')
-    .executeTakeFirst();
-  if (pending?.lapsed) await expireBooking(pending.id);
-  else if (pending) {
+  // One round trip for both checks: this runs on every hold attempt, the hottest path in
+  // an on-sale.
+  const { pendingId, pendingLapsed, owned } = await db
+    .selectNoFrom((eb) => [
+      eb
+        .selectFrom('bookings')
+        .select('id')
+        .where('userId', '=', req.userId)
+        .where('eventId', '=', req.eventId)
+        .where('status', '=', 'pending')
+        .as('pendingId'),
+      eb
+        .selectFrom('bookings')
+        .select(sql<boolean>`expires_at <= now()`.as('lapsed'))
+        .where('userId', '=', req.userId)
+        .where('eventId', '=', req.eventId)
+        .where('status', '=', 'pending')
+        .as('pendingLapsed'),
+      eb
+        .selectFrom('bookingItems as bi')
+        .innerJoin('bookings as b', 'b.id', 'bi.bookingId')
+        .select((e) => e.fn.countAll<number>().as('n'))
+        .where('b.userId', '=', req.userId)
+        .where('b.eventId', '=', req.eventId)
+        .where('b.status', '=', 'confirmed')
+        .as('owned'),
+    ])
+    .executeTakeFirstOrThrow();
+
+  if (pendingId && pendingLapsed) await expireBooking(pendingId);
+  else if (pendingId) {
     throw conflict(
       'HOLD_EXISTS',
       'You already have seats on hold for this event; pay for or cancel them first',
       {
-        bookingId: pending.id,
+        bookingId: pendingId,
       },
     );
   }
 
-  const { owned } = await db
-    .selectFrom('bookingItems as bi')
-    .innerJoin('bookings as b', 'b.id', 'bi.bookingId')
-    .select((eb) => eb.fn.countAll<number>().as('owned'))
-    .where('b.userId', '=', req.userId)
-    .where('b.eventId', '=', req.eventId)
-    .where('b.status', '=', 'confirmed')
-    .executeTakeFirstOrThrow();
-  if (owned + req.seatIds.length > event.maxTicketsPerUser) {
+  const alreadyOwned = Number(owned ?? 0);
+  if (alreadyOwned + req.seatIds.length > event.maxTicketsPerUser) {
     throw conflict('TICKET_LIMIT_EXCEEDED', `At most ${event.maxTicketsPerUser} tickets per customer`, {
-      alreadyOwned: owned,
+      alreadyOwned,
     });
   }
 }
@@ -239,7 +258,7 @@ async function createHold(
       SET status = 'held', booking_id = ${booking.id}, version = es.version + 1
       FROM unnest(${rows.map((r) => r.id)}::bigint[], ${rows.map((r) => r.version)}::int[]) AS seen(id, version)
       WHERE es.id = seen.id AND es.version = seen.version
-      RETURNING es.id, es.status, es.version
+      RETURNING es.id, es.event_id, es.status, es.version
     `
       .execute(trx)
       .then((r) => r.rows);
@@ -253,9 +272,10 @@ async function createHold(
       .updateTable('eventSeats')
       .set({ status: 'held', bookingId: booking.id, version: sql`version + 1` })
       .where('id', 'in', req.seatIds)
-      .returning(['id', 'status', 'version'])
+      .returning(['id', 'eventId', 'status', 'version'])
       .execute();
   }
+  changed(changes);
 
   await trx
     .insertInto('bookingItems')
@@ -337,7 +357,7 @@ const strategies: Record<
     const rows = await seatQuery(db, req.seatIds).where('es.eventId', '=', req.eventId).execute();
     await assertSeatsExist(db, req.eventId, req.seatIds, rows);
     assertAcquirable(rows);
-    return db.transaction().execute((trx) => createHold(trx, req, event, rows, opts, 'plain'));
+    return withTransaction((trx) => createHold(trx, req, event, rows, opts, 'plain'), { retries: 0 });
   },
 };
 
@@ -507,8 +527,9 @@ export async function confirmBookingInTx(
     .updateTable('eventSeats')
     .set({ status: 'booked', bookingId, version: sql`version + 1` })
     .where('id', 'in', seatIds)
-    .returning(['id', 'status', 'version'])
+    .returning(['id', 'eventId', 'status', 'version'])
     .execute();
+  changed(changes);
   await trx
     .updateTable('bookings')
     .set({ status: 'confirmed', confirmedAt: sql`now()` })
@@ -605,11 +626,13 @@ export async function cancelPendingBookingsForEvent(
     .returning('id')
     .execute();
   if (!cancelled.length) return [];
-  return trx
-    .updateTable('eventSeats')
-    .set({ status: 'available', bookingId: null, version: sql`version + 1` })
-    .where('eventId', '=', eventId)
-    .where('status', '=', 'held')
-    .returning(['id', 'status', 'version'])
-    .execute();
+  return changed(
+    await trx
+      .updateTable('eventSeats')
+      .set({ status: 'available', bookingId: null, version: sql`version + 1` })
+      .where('eventId', '=', eventId)
+      .where('status', '=', 'held')
+      .returning(['id', 'eventId', 'status', 'version'])
+      .execute(),
+  );
 }

@@ -1,12 +1,17 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { sql, type Kysely, type Transaction } from 'kysely';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
+import { config } from '../../config.js';
 import { db } from '../../db/index.js';
 import { withTransaction } from '../../db/transaction.js';
 import { enqueue } from '../../jobs/outbox.js';
 import type { DB, SeatStatus } from '../../db/types.js';
 import { AppError, conflict, forbidden, notFound, unauthorized, unprocessable } from '../../lib/errors.js';
 import { acquirableSql, cancelPendingBookingsForEvent } from '../bookings/service.js';
+import { bumpGenerations, generationKey, invalidate, MicroCache, readThrough } from '../../lib/cache.js';
+import { sendCachedJson } from '../../lib/http-cache.js';
+import { stableStringify } from '../../lib/json.js';
 import { decodeCursor, encodeCursor } from '../../lib/pagination.js';
 import { errors, IdParams } from '../../lib/schemas.js';
 import { bearerAuth, currentUser, optionalAuth, requireRole, type AuthUser } from '../auth/guard.js';
@@ -70,10 +75,41 @@ const toEventDto = (r: EventRow): z.infer<typeof EventDto> => ({
   updatedAt: r.updatedAt.toISOString(),
 });
 
-async function getEventDetail(id: string, viewer: AuthUser | null): Promise<z.infer<typeof EventDetailDto>> {
-  const [event, stats] = await Promise.all([
-    selectEvents(db).where('e.id', '=', id).executeTakeFirst(),
-    db
+// ─── read side: caching (see lib/cache.ts for the two strategies) ─────────────────────────
+
+type EventDetail = z.infer<typeof EventDetailDto>;
+type StaticEvent = Omit<EventDetail, 'seats'>;
+
+/**
+ * Everything about an event except live availability: cached in Redis, and invalidated
+ * through the event's generation counter whenever the event is written.
+ */
+async function loadStaticEvent(id: string): Promise<StaticEvent | null> {
+  const { body } = await readThrough('event', `event:${id}`, [generationKey.event(id)], 300, async () => {
+    const [event, prices] = await Promise.all([
+      selectEvents(db).where('e.id', '=', id).executeTakeFirst(),
+      db
+        .selectFrom('eventSeats')
+        .where('eventId', '=', id)
+        .select((eb) => [eb.fn.min('priceCents').as('minCents'), eb.fn.max('priceCents').as('maxCents')])
+        .executeTakeFirstOrThrow(),
+    ]);
+    if (!event) return 'null'; // cache the miss too, so a flood of bad ids can't bypass the cache
+    const detail: StaticEvent = {
+      ...toEventDto(event),
+      priceRange: prices.minCents === null ? null : { minCents: prices.minCents, maxCents: prices.maxCents },
+    };
+    return JSON.stringify(detail);
+  });
+  return JSON.parse(body) as StaticEvent | null;
+}
+
+/** Live availability changes with every hold: in-process micro-cache (1 s), never invalidated. */
+const availabilityCache = new MicroCache('seat-counts', config.MICRO_CACHE_TTL_MS);
+
+async function availability(id: string): Promise<EventDetail['seats']> {
+  const { body } = await availabilityCache.get(id, async () => {
+    const counts = await db
       .selectFrom('eventSeats as es')
       .leftJoin('bookings as b', 'b.id', 'es.bookingId')
       .where('es.eventId', '=', id)
@@ -81,18 +117,72 @@ async function getEventDetail(id: string, viewer: AuthUser | null): Promise<z.in
         eb.fn.countAll<number>().as('total'),
         // Seats of lapsed holds count as available, whether or not the expiry job has run.
         sql<number>`count(*) FILTER (WHERE ${acquirableSql})`.as('available'),
-        eb.fn.min('es.priceCents').as('minCents'),
-        eb.fn.max('es.priceCents').as('maxCents'),
       ])
-      .executeTakeFirstOrThrow(),
-  ]);
-  if (!event || !isVisible(event, viewer)) throw notFound('Event');
+      .executeTakeFirstOrThrow();
+    return JSON.stringify({ total: counts.total, available: counts.available });
+  });
+  return JSON.parse(body) as EventDetail['seats'];
+}
 
-  return {
-    ...toEventDto(event),
-    seats: { total: stats.total, available: stats.available },
-    priceRange: stats.minCents === null ? null : { minCents: stats.minCents, maxCents: stats.maxCents },
+async function getEventDetail(id: string, viewer: AuthUser | null): Promise<EventDetail> {
+  const event = await loadStaticEvent(id);
+  // The visibility check runs on every request, cache hit or not.
+  if (!event || !isVisible(event, viewer)) throw notFound('Event');
+  return { ...event, seats: await availability(id) };
+}
+
+/** Seat maps are the hottest read of an on-sale: in-process, 1 s, single-flight. */
+const seatMapCache = new MicroCache('seat-map', config.MICRO_CACHE_TTL_MS, 200);
+
+async function buildSeatMap(eventId: string, currency: string): Promise<string> {
+  const rows = await db
+    .selectFrom('eventSeats as es')
+    .innerJoin('venueSeats as vs', 'vs.id', 'es.venueSeatId')
+    .innerJoin('venueSections as sec', 'sec.id', 'vs.sectionId')
+    .leftJoin('bookings as b', 'b.id', 'es.bookingId')
+    .where('es.eventId', '=', eventId)
+    .select([
+      'es.id',
+      'es.priceCents',
+      // A seat whose hold has lapsed is shown as available straight away, even before
+      // the expiry job has released it.
+      sql<SeatStatus>`CASE WHEN ${acquirableSql} THEN 'available'::seat_status ELSE es.status END`.as(
+        'status',
+      ),
+      'es.version',
+      'vs.rowLabel',
+      'vs.seatNumber',
+      'vs.x',
+      'vs.y',
+      'sec.name as section',
+    ])
+    .orderBy('sec.sortOrder')
+    .orderBy('vs.y')
+    .orderBy('vs.x')
+    .execute();
+
+  const sections = new Map<string, z.infer<typeof SeatMapResponse>['sections'][number]>();
+  for (const r of rows) {
+    let section = sections.get(r.section);
+    if (!section) sections.set(r.section, (section = { name: r.section, seats: [] }));
+    section.seats.push({
+      id: r.id,
+      row: r.rowLabel,
+      number: r.seatNumber,
+      x: r.x,
+      y: r.y,
+      priceCents: r.priceCents,
+      status: r.status,
+      version: r.version,
+    });
+  }
+  const map: z.infer<typeof SeatMapResponse> = {
+    eventId,
+    currency,
+    generatedAt: new Date().toISOString(),
+    sections: [...sections.values()],
   };
+  return JSON.stringify(map);
 }
 
 /** Postgres raises 23P01 when the events_no_venue_overlap exclusion constraint fires. */
@@ -118,6 +208,51 @@ async function lockVenueSchedule(trx: Transaction<DB>, venueId: string) {
 
 const venueOverlap = () =>
   conflict('VENUE_TIME_CONFLICT', 'The venue already has an event overlapping this time slot');
+
+type ListQuery = z.infer<typeof ListEventsQuery>;
+
+async function listEvents({
+  q,
+  city,
+  category,
+  venueId,
+  organizerId,
+  status,
+  from,
+  to,
+  limit,
+  cursor,
+}: ListQuery) {
+  let query = selectEvents(db).where('e.status', '=', status);
+  if (q) query = query.where(sql<boolean>`e.search @@ websearch_to_tsquery('english', ${q})`);
+  if (city) query = query.where(sql`lower(v.city)`, '=', city.toLowerCase());
+  if (category) query = query.where('e.category', '=', category);
+  if (venueId) query = query.where('e.venueId', '=', venueId);
+  if (organizerId) query = query.where('e.organizerId', '=', organizerId);
+  // Upcoming events by default. Pass an earlier `from` to include past ones.
+  query = query.where('e.startsAt', '>=', from ? new Date(from) : new Date());
+  if (to) query = query.where('e.startsAt', '<', new Date(to));
+  if (cursor) {
+    const c = decodeCursor(cursor);
+    // A row-value comparison matches the (status, starts_at, id) index exactly.
+    query = query.where(sql<boolean>`(e.starts_at, e.id) > (${c.at}::timestamptz, ${c.id}::uuid)`);
+  }
+
+  // Fetch one extra row. If it comes back, there's another page.
+  const rows = await query
+    .orderBy('e.startsAt')
+    .orderBy('e.id')
+    .limit(limit + 1)
+    .execute();
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page.at(-1);
+  return {
+    data: page.map(toEventDto),
+    page: { limit, nextCursor: hasMore && last ? encodeCursor({ at: last.startsAt, id: last.id }) : null },
+  };
+}
 
 export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post(
@@ -190,6 +325,7 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
             WHERE sec.venue_id = ${venueId}::uuid
           `.execute(trx);
 
+          invalidate(generationKey.eventLists);
           return id;
         });
       } catch (err) {
@@ -215,11 +351,11 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
         response: { 200: EventListResponse, ...errors },
       },
     },
-    async (req) => {
-      const { q, city, category, venueId, status, from, to, limit, cursor } = req.query;
-      let { organizerId } = req.query;
+    async (req, reply) => {
+      const query = req.query;
+      let { organizerId } = query;
 
-      if (status === 'draft') {
+      if (query.status === 'draft') {
         const user = req.user;
         if (!user) throw unauthorized();
         if (user.role === 'attendee') throw forbidden('Only organizers can list drafts');
@@ -227,41 +363,17 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
           if (organizerId && organizerId !== user.id) throw forbidden('You can only list your own drafts');
           organizerId = user.id;
         }
+        // Drafts depend on who's asking: never cached.
+        return listEvents({ ...query, organizerId });
       }
 
-      let query = selectEvents(db).where('e.status', '=', status);
-      if (q) query = query.where(sql<boolean>`e.search @@ websearch_to_tsquery('english', ${q})`);
-      if (city) query = query.where(sql`lower(v.city)`, '=', city.toLowerCase());
-      if (category) query = query.where('e.category', '=', category);
-      if (venueId) query = query.where('e.venueId', '=', venueId);
-      if (organizerId) query = query.where('e.organizerId', '=', organizerId);
-      // Upcoming events by default. Pass an earlier `from` to include past ones.
-      query = query.where('e.startsAt', '>=', from ? new Date(from) : new Date());
-      if (to) query = query.where('e.startsAt', '<', new Date(to));
-      if (cursor) {
-        const c = decodeCursor(cursor);
-        // A row-value comparison matches the (status, starts_at, id) index exactly.
-        query = query.where(sql<boolean>`(e.starts_at, e.id) > (${c.at}::timestamptz, ${c.id}::uuid)`);
-      }
-
-      // Fetch one extra row. If it comes back, there's another page.
-      const rows = await query
-        .orderBy('e.startsAt')
-        .orderBy('e.id')
-        .limit(limit + 1)
-        .execute();
-
-      const hasMore = rows.length > limit;
-      const page = hasMore ? rows.slice(0, limit) : rows;
-      const last = page.at(-1);
-
-      return {
-        data: page.map(toEventDto),
-        page: {
-          limit,
-          nextCursor: hasMore && last ? encodeCursor({ at: last.startsAt, id: last.id }) : null,
-        },
-      };
+      // Public listings are the same for everyone: cache them in Redis (30 s) under the
+      // event-lists generation, and let browsers and CDNs keep them for 5 s.
+      const key = `events:list:${createHash('sha1').update(stableStringify(query)).digest('base64url')}`;
+      const cached = await readThrough('event-list', key, [generationKey.eventLists], 30, async () =>
+        JSON.stringify(await listEvents(query)),
+      );
+      return sendCachedJson(req, reply, cached, 'public, max-age=5');
     },
   );
 
@@ -352,6 +464,7 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
             .set({ ...patch, startsAt, endsAt, salesStartAt })
             .where('id', '=', id)
             .execute();
+          invalidate(generationKey.event(id), generationKey.eventLists);
 
           // Cancelling the event voids every seat hold on it, and queues refunds for every paid
           // booking (a job, since a big show can have thousands).
@@ -405,7 +518,37 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
           `Only draft events can be deleted (status is ${event.status}); cancel it instead`,
         );
       }
+      await bumpGenerations(generationKey.event(req.params.id), generationKey.eventLists);
       return reply.status(204).send(null);
+    },
+  );
+
+  app.get(
+    '/events/:id/live',
+    {
+      websocket: true,
+      schema: {
+        tags: ['events'],
+        summary: 'Live seat updates (WebSocket)',
+        description:
+          'Connect with a WebSocket. The server sends {"type":"hello"} once subscribed; load GET /events/:id/seats after that, ' +
+          'then apply {"type":"seats","seats":[[seatId, status, version], ...]} messages, ignoring any seat update whose ' +
+          'version is not newer than what you have. Updates are batched (~100 ms). Close code 1001/1013: reconnect.',
+        params: IdParams,
+      },
+    },
+    async (socket, req) => {
+      // No auth over WebSockets (browsers can't set headers on them), so only public events stream.
+      const event = await loadStaticEvent(req.params.id);
+      if (!event || event.status === 'draft') {
+        socket.close(4404, 'Event not found');
+        return;
+      }
+      if (await app.liveHub.join(event.id, socket)) {
+        socket.send(
+          JSON.stringify({ type: 'hello', eventId: event.id, serverTime: new Date().toISOString() }),
+        );
+      }
     },
   );
 
@@ -420,57 +563,12 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
         response: { 200: SeatMapResponse, ...errors },
       },
     },
-    async (req) => {
-      const event = await db
-        .selectFrom('events')
-        .select(['id', 'currency', 'status', 'organizerId'])
-        .where('id', '=', req.params.id)
-        .executeTakeFirst();
+    async (req, reply) => {
+      const event = await loadStaticEvent(req.params.id);
       if (!event || !isVisible(event, req.user)) throw notFound('Event');
-
-      const rows = await db
-        .selectFrom('eventSeats as es')
-        .innerJoin('venueSeats as vs', 'vs.id', 'es.venueSeatId')
-        .innerJoin('venueSections as sec', 'sec.id', 'vs.sectionId')
-        .leftJoin('bookings as b', 'b.id', 'es.bookingId')
-        .where('es.eventId', '=', event.id)
-        .select([
-          'es.id',
-          'es.priceCents',
-          // A seat whose hold has lapsed is shown as available straight away, even before
-          // the expiry job has released it.
-          sql<SeatStatus>`CASE WHEN ${acquirableSql} THEN 'available'::seat_status ELSE es.status END`.as(
-            'status',
-          ),
-          'es.version',
-          'vs.rowLabel',
-          'vs.seatNumber',
-          'vs.x',
-          'vs.y',
-          'sec.name as section',
-        ])
-        .orderBy('sec.sortOrder')
-        .orderBy('vs.y')
-        .orderBy('vs.x')
-        .execute();
-
-      const sections = new Map<string, z.infer<typeof SeatMapResponse>['sections'][number]>();
-      for (const r of rows) {
-        let section = sections.get(r.section);
-        if (!section) sections.set(r.section, (section = { name: r.section, seats: [] }));
-        section.seats.push({
-          id: r.id,
-          row: r.rowLabel,
-          number: r.seatNumber,
-          x: r.x,
-          y: r.y,
-          priceCents: r.priceCents,
-          status: r.status,
-          version: r.version,
-        });
-      }
-
-      return { eventId: event.id, currency: event.currency.trim(), sections: [...sections.values()] };
+      const cached = await seatMapCache.get(event.id, () => buildSeatMap(event.id, event.currency));
+      // no-cache: clients may store it but must revalidate; an unchanged map costs a 304.
+      return sendCachedJson(req, reply, cached, 'no-cache');
     },
   );
 };

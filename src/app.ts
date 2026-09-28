@@ -1,5 +1,10 @@
+import { hostname } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyServerOptions } from 'fastify';
 import cookie from '@fastify/cookie';
+import fastifyStatic from '@fastify/static';
+import websocket from '@fastify/websocket';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import {
@@ -10,6 +15,8 @@ import {
 } from 'fastify-type-provider-zod';
 import { config } from './config.js';
 import { requestContext } from './lib/context.js';
+import { enforce, type RateLimitRule } from './lib/rate-limit.js';
+import { LiveSeatHub } from './realtime/hub.js';
 import { errorHandler } from './lib/errors.js';
 import { transformObject } from './lib/openapi.js';
 import { adminRoutes } from './modules/admin/routes.js';
@@ -25,13 +32,43 @@ import { fakeGatewayRoutes } from './fake-gateway/routes.js';
 import { posterRoutes } from './modules/events/posters.js';
 import { ticketRoutes } from './modules/tickets/routes.js';
 
+declare module 'fastify' {
+  interface FastifyInstance {
+    liveHub: LiveSeatHub;
+  }
+}
+
 export interface AppOverrides {
   /** Lets scripts (e.g. the race test) run the booking flow with a different strategy. */
   booking?: Partial<BookingOptions>;
+  /** Per-IP API rate limit; tests and load tests adjust it. */
+  rateLimit?: { enabled: boolean; capacity?: number; refillPerSec?: number };
 }
 
+const INSTANCE_ID = config.INSTANCE_ID ?? `${hostname()}:${process.pid}`;
+const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
+
+/** Browser security policy for the demo pages: only our own scripts, styles and API. */
+const STATIC_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self'",
+  `img-src 'self' data: ${config.S3_PUBLIC_URL}`,
+  "connect-src 'self'",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+].join('; ');
+
+/** TRUST_PROXY as Fastify wants it: a hop count becomes "trust the nearest N proxies". */
+const trustProxy =
+  typeof config.TRUST_PROXY === 'number'
+    ? (_address: string, hop: number) => hop < (config.TRUST_PROXY as number)
+    : config.TRUST_PROXY;
+
 export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOverrides = {}) {
-  const app = Fastify(opts).withTypeProvider<ZodTypeProvider>();
+  // trustProxy decides whose X-Forwarded-For to believe (see TRUST_PROXY in config.ts).
+  const app = Fastify({ ...opts, trustProxy }).withTypeProvider<ZodTypeProvider>();
 
   app.decorate('bookingOptions', {
     strategy: config.HOLD_STRATEGY,
@@ -43,6 +80,35 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
   // Everything that runs for a request (handlers, and code deep inside services such as the
   // outbox) can read the request id from here without it being passed around.
   app.addHook('onRequest', (req, _reply, done) => requestContext.run({ requestId: req.id }, done));
+
+  // Per-client-IP limit on the whole API, shared across instances through Redis. It runs
+  // before auth and body parsing, so a flood is turned away as cheaply as possible. Provider
+  // webhooks are exempt: their source IPs are shared and bursty, and they are signed anyway.
+  const rateLimit = overrides.rateLimit ?? { enabled: config.RATE_LIMIT_ENABLED };
+  if (rateLimit.enabled) {
+    const rule: RateLimitRule = {
+      name: 'api:ip',
+      capacity: rateLimit.capacity ?? config.RATE_LIMIT_IP_CAPACITY,
+      refillPerSec: rateLimit.refillPerSec ?? config.RATE_LIMIT_IP_REFILL_PER_SEC,
+    };
+    app.addHook('onRequest', async (req, reply) => {
+      if (!req.url.startsWith('/api/') || req.url.startsWith('/api/v1/webhooks/')) return;
+      await enforce(req, reply, [[rule, req.ip]]);
+    });
+  }
+
+  // Which instance answered: handy for watching the load balancer spread requests.
+  app.addHook('onSend', async (_req, reply) => {
+    reply.header('x-served-by', INSTANCE_ID);
+  });
+
+  // Live seat maps. The hub keeps this instance's WebSocket clients and one Redis
+  // subscription per watched event. It closes before the server does (preClose), telling
+  // clients "going away" so they reconnect to another instance.
+  const hub = new LiveSeatHub();
+  app.decorate('liveHub', hub);
+  app.addHook('preClose', async () => hub.close());
+  await app.register(websocket, { options: { maxPayload: 4096 } });
 
   // Zod schemas handle request validation, response serialization and the OpenAPI spec,
   // so there's one source of truth for all three.
@@ -90,6 +156,18 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
       error: { code: 'ROUTE_NOT_FOUND', message: `Route ${req.method} ${req.url} not found` },
     }),
   );
+
+  // The demo pages (seat map, password reset). wildcard: false registers one route per
+  // file, so unknown paths still reach our JSON 404 handler.
+  await app.register(fastifyStatic, {
+    root: PUBLIC_DIR,
+    wildcard: false,
+    setHeaders: (reply) => {
+      reply.header('content-security-policy', STATIC_CSP);
+      reply.header('x-content-type-options', 'nosniff');
+      reply.header('referrer-policy', 'no-referrer');
+    },
+  });
 
   await app.register(healthRoutes);
   // The simulated payment provider's browser API (dev and test only; refused in production).

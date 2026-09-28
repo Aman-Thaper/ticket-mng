@@ -1,6 +1,7 @@
 import { UnrecoverableError } from 'bullmq';
 import sharp from 'sharp';
 import { db } from '../../db/index.js';
+import { bumpGenerations, generationKey } from '../../lib/cache.js';
 import { getObject, putObject } from '../../lib/storage.js';
 import type { Jobs } from '../queues.js';
 import type { JobHandler } from '../runner.js';
@@ -36,6 +37,7 @@ export const processPoster: JobHandler<Jobs['media']['process-poster']> = async 
       .where('id', '=', eventId)
       .where('posterKey', '=', key)
       .execute();
+    await bumpGenerations(generationKey.event(eventId), generationKey.eventLists);
     throw new UnrecoverableError(`poster rejected: ${(err as Error).message}`);
   }
 
@@ -62,6 +64,7 @@ export const processPoster: JobHandler<Jobs['media']['process-poster']> = async 
     .where('posterKey', '=', key)
     .executeTakeFirst();
   if (updated.numUpdatedRows === 0n) log.info('a newer poster was uploaded meanwhile; result discarded');
+  else await bumpGenerations(generationKey.event(eventId), generationKey.eventLists);
 
   return {
     width: meta.width,

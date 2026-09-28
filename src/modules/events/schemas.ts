@@ -147,6 +147,9 @@ export const SeatMapResponse = z
   .object({
     eventId: z.uuid(),
     currency: z.string(),
+    generatedAt: Timestamp.describe(
+      'When this snapshot was taken (it may be up to ~1 s old). Live changes stream over GET /events/:id/live.',
+    ),
     sections: z.array(
       z.object({
         name: z.string(),

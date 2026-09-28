@@ -29,6 +29,11 @@ Object.assign(process.env, {
   DATABASE_URL: dbUrl,
   REDIS_URL: redisUrl,
   MAIL_TRANSPORT: 'memory',
+  // Every inject() comes from 127.0.0.1: a per-IP limit would throttle the suite itself.
+  // (test/api/scaling.test.ts turns it on explicitly.)
+  RATE_LIMIT_ENABLED: 'false',
+  // Tests read right after writing; the 1 s micro-caches would serve the previous state.
+  MICRO_CACHE_TTL_MS: '0',
   // Tests upload and resize real images in MinIO, in their own bucket.
   S3_BUCKET: process.env.TEST_S3_BUCKET ?? 'ticket-media-test',
   // Minimum argon2 cost: the hashing itself isn't under test, and OWASP parameters would

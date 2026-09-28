@@ -13,7 +13,7 @@ An event ticketing backend built phase by phase to practise the hard parts: conc
 | 3     | Seat holds (10 min) + booking, race-condition test (200 concurrent requests), locking               | ✅     |
 | 4     | Workers (BullMQ): QR ticket emails, poster uploads to MinIO, scheduled jobs, DLQ                    | ✅     |
 | 5     | Payments + webhooks, idempotency keys, booking state machine                                        | ✅     |
-| 6     | Flash sale: k6, Redis cache, rate limiting, WebSockets + pub/sub, 3 instances behind Nginx          |        |
+| 6     | Flash sale: k6, Redis cache, rate limiting, WebSockets + pub/sub, 3 instances behind Nginx          | ✅     |
 | 7     | Docker Compose, CI, structured logs, metrics, deploy                                                |        |
 
 ## Setup
@@ -38,16 +38,20 @@ npm run dev         # API: http://localhost:3000/docs
 npm run worker      # background jobs + outbox relay (second terminal)
 ```
 
-| Script                             |                                                                              |
-| ---------------------------------- | ---------------------------------------------------------------------------- |
-| `npm run dev`                      | API with reload on save                                                      |
-| `npm run worker`                   | background worker with reload on save                                        |
-| `npm test`                         | unit + API integration tests (API tests use `TEST_DATABASE_URL` and wipe it) |
-| `npm run test:unit`                | unit tests only, no DB needed                                                |
-| `npm run migrate` / `migrate:down` | apply all migrations / roll back the last one                                |
-| `npm run seed`                     | **wipes** the dev DB and loads realistic volume                              |
-| `npm run race`                     | 200 concurrent holds on one seat, per locking strategy (see below)           |
-| `npm run typecheck`                | `tsc --noEmit`                                                               |
+| Script                                        |                                                                                         |
+| --------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `npm run dev`                                 | API with reload on save                                                                 |
+| `npm run worker`                              | background worker with reload on save                                                   |
+| `npm test`                                    | unit + API integration tests (API tests use `TEST_DATABASE_URL` and wipe it)            |
+| `npm run test:unit`                           | unit tests only, no DB needed                                                           |
+| `npm run migrate` / `migrate:down`            | apply all migrations / roll back the last one                                           |
+| `npm run seed`                                | **wipes** the dev DB and loads realistic volume                                         |
+| `npm run race`                                | 200 concurrent holds on one seat, per locking strategy (see below)                      |
+| `scripts/cluster.sh start`                    | 3 API instances + worker behind Nginx on :8080 (`loadtest` mode lifts the per-IP limit) |
+| `npm run loadtest:setup` + `npm run loadtest` | k6 flash sale (needs the cluster in `loadtest` mode)                                    |
+| `npm run check:invariants`                    | audit the database: no seat sold twice, no money kept for nothing, ...                  |
+| `npm run e2e`                                 | headless-browser test of the live seat map (buyer + watcher)                            |
+| `npm run typecheck`                           | `tsc --noEmit`                                                                          |
 
 ## Layout
 
@@ -71,41 +75,42 @@ test/unit, test/api
 
 All routes are under `/api/v1`. Interactive docs are at `/docs`, and the raw spec is at `/docs/json`.
 
-| Method      | Path                                           | Notes                                                                                                                   |
-| ----------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| POST        | `/auth/signup`, `/auth/login`                  | returns an access token; sets the refresh token as an httpOnly cookie                                                   |
-| POST        | `/auth/refresh`                                | rotates the refresh cookie; reusing an old one revokes the session                                                      |
-| POST        | `/auth/logout`, `/auth/logout-all`             | revoke this session / every session                                                                                     |
-| GET/DELETE  | `/auth/sessions[/:id]`                         | list and revoke your logged-in devices                                                                                  |
-| POST        | `/auth/password/change`                        | revokes your other sessions                                                                                             |
-| POST        | `/auth/password-reset/request`, `/confirm`     | emailed single-use token (30 min)                                                                                       |
-| GET/PATCH   | `/users/me`                                    | your profile                                                                                                            |
-| GET         | `/users/:id`                                   | admin                                                                                                                   |
-| PATCH       | `/users/:id/role`                              | admin; revokes the user's sessions                                                                                      |
-| POST        | `/venues`                                      | organizer/admin; generates seats from `sections: [{name, rows, seatsPerRow}]`                                           |
-| GET         | `/venues`                                      | `q`, `city`, `limit`, `offset`                                                                                          |
-| GET         | `/venues/:id`                                  | includes section summary                                                                                                |
-| POST        | `/events`                                      | creates a **draft** and copies venue seats into priced inventory                                                        |
-| GET         | `/events`                                      | `q` (full-text), `city`, `category`, `venueId`, `organizerId`, `status`, `from` (default: now), `to`, `limit`, `cursor` |
-| GET         | `/events/:id`                                  | includes `seats {total, available}` and `priceRange`                                                                    |
-| PATCH       | `/events/:id`                                  | partial update and status transitions                                                                                   |
-| DELETE      | `/events/:id`                                  | drafts only (others must be cancelled)                                                                                  |
-| GET         | `/events/:id/seats`                            | seat map grouped by section, with x/y, price and status                                                                 |
-| POST        | `/events/:id/bookings`                         | hold seats for 10 min (pending booking); 409 if taken                                                                   |
-| GET         | `/bookings`, `/bookings/:id`                   | your bookings (cursor pagination) / one booking                                                                         |
-| POST        | `/bookings/:id/payment`                        | start paying: payment intent + client secret (idempotent per booking)                                                   |
-| POST        | `/bookings/:id/refund`                         | refund a confirmed booking (until 24 h before the event)                                                                |
-| POST        | `/webhooks/:provider`                          | provider webhooks: signature-verified, deduplicated, queued                                                             |
-| POST        | `/fake-gateway/v1/payment_intents/:id/confirm` | dev only: pay with a test card (4242…, 4000…0002 declined)                                                              |
-| POST        | `/bookings/:id/cancel`                         | release a pending hold                                                                                                  |
-| GET         | `/bookings/:id/tickets`                        | QR tickets (signed tokens + PNG data URLs)                                                                              |
-| POST        | `/check-in`                                    | organizer scans a QR code; each ticket admits once                                                                      |
-| GET         | `/tickets/public-key`                          | Ed25519 key for verifying tickets offline                                                                               |
-| POST        | `/events/:id/poster/upload-url`                | presigned POST: upload straight to S3/MinIO                                                                             |
-| PUT         | `/events/:id/poster`                           | queue resizing of an uploaded poster (202)                                                                              |
-| GET         | `/admin/queues`, `/admin/dead-letters`         | queue depths, outbox backlog, failed jobs (admin)                                                                       |
-| POST/DELETE | `/admin/dead-letters/:id[/retry]`              | requeue or discard a dead job (admin)                                                                                   |
-| GET         | `/health`                                      | DB ping                                                                                                                 |
+| Method          | Path                                           | Notes                                                                                                                   |
+| --------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| POST            | `/auth/signup`, `/auth/login`                  | returns an access token; sets the refresh token as an httpOnly cookie                                                   |
+| POST            | `/auth/refresh`                                | rotates the refresh cookie; reusing an old one revokes the session                                                      |
+| POST            | `/auth/logout`, `/auth/logout-all`             | revoke this session / every session                                                                                     |
+| GET/DELETE      | `/auth/sessions[/:id]`                         | list and revoke your logged-in devices                                                                                  |
+| POST            | `/auth/password/change`                        | revokes your other sessions                                                                                             |
+| POST            | `/auth/password-reset/request`, `/confirm`     | emailed single-use token (30 min)                                                                                       |
+| GET/PATCH       | `/users/me`                                    | your profile                                                                                                            |
+| GET             | `/users/:id`                                   | admin                                                                                                                   |
+| PATCH           | `/users/:id/role`                              | admin; revokes the user's sessions                                                                                      |
+| POST            | `/venues`                                      | organizer/admin; generates seats from `sections: [{name, rows, seatsPerRow}]`                                           |
+| GET             | `/venues`                                      | `q`, `city`, `limit`, `offset`                                                                                          |
+| GET             | `/venues/:id`                                  | includes section summary                                                                                                |
+| POST            | `/events`                                      | creates a **draft** and copies venue seats into priced inventory                                                        |
+| GET             | `/events`                                      | `q` (full-text), `city`, `category`, `venueId`, `organizerId`, `status`, `from` (default: now), `to`, `limit`, `cursor` |
+| GET             | `/events/:id`                                  | includes `seats {total, available}` and `priceRange`                                                                    |
+| PATCH           | `/events/:id`                                  | partial update and status transitions                                                                                   |
+| DELETE          | `/events/:id`                                  | drafts only (others must be cancelled)                                                                                  |
+| GET             | `/events/:id/seats`                            | seat map grouped by section, with x/y, price and status                                                                 |
+| GET (WebSocket) | `/events/:id/live`                             | live seat updates: `hello`, then `[seatId, status, version]` batches                                                    |
+| POST            | `/events/:id/bookings`                         | hold seats for 10 min (pending booking); 409 if taken                                                                   |
+| GET             | `/bookings`, `/bookings/:id`                   | your bookings (cursor pagination) / one booking                                                                         |
+| POST            | `/bookings/:id/payment`                        | start paying: payment intent + client secret (idempotent per booking)                                                   |
+| POST            | `/bookings/:id/refund`                         | refund a confirmed booking (until 24 h before the event)                                                                |
+| POST            | `/webhooks/:provider`                          | provider webhooks: signature-verified, deduplicated, queued                                                             |
+| POST            | `/fake-gateway/v1/payment_intents/:id/confirm` | dev only: pay with a test card (4242…, 4000…0002 declined)                                                              |
+| POST            | `/bookings/:id/cancel`                         | release a pending hold                                                                                                  |
+| GET             | `/bookings/:id/tickets`                        | QR tickets (signed tokens + PNG data URLs)                                                                              |
+| POST            | `/check-in`                                    | organizer scans a QR code; each ticket admits once                                                                      |
+| GET             | `/tickets/public-key`                          | Ed25519 key for verifying tickets offline                                                                               |
+| POST            | `/events/:id/poster/upload-url`                | presigned POST: upload straight to S3/MinIO                                                                             |
+| PUT             | `/events/:id/poster`                           | queue resizing of an uploaded poster (202)                                                                              |
+| GET             | `/admin/queues`, `/admin/dead-letters`         | queue depths, outbox backlog, failed jobs (admin)                                                                       |
+| POST/DELETE     | `/admin/dead-letters/:id[/retry]`              | requeue or discard a dead job (admin)                                                                                   |
+| GET             | `/health`                                      | DB ping                                                                                                                 |
 
 **Errors** always have the shape `{ "error": { "code", "message", "details?" } }`.
 
@@ -188,6 +193,38 @@ worker: fetch the payment's CURRENT state from the provider ──▶ confirm bo
 | Refund requested                      | until 24 h before the event; seats and tickets are released only once the provider confirms the refund                           |
 
 Try chaos mode (`FAKE_GATEWAY_CHAOS=true`): every webhook is delivered twice, after random delays, so they can arrive out of order. Bookings still end up in exactly the right state.
+
+## The flash sale
+
+**Demo:** open `http://localhost:3000/` (or `:8080` through the cluster) in two browser windows. Log in on one (the demo account is prefilled), then hold and pay for seats; the other window's seat map changes live.
+
+| Concern                         | How                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Live seat maps across instances | Every seat change is published to Redis (`seats:<event>`) **after commit**. Each API instance subscribes only to events its WebSocket clients watch, batches updates for 100 ms (newest version per seat wins) and drops clients that fall 1 MiB behind. Clients subscribe first, then load the snapshot, and apply updates by version, so no change is missed or applied twice. |
+| Caching: hot, changing data     | Seat maps and live counts: in-process micro-cache, 1 s, single-flight (a thousand concurrent misses cost one query), ETag → 304. Never invalidated; the WebSocket keeps clients current.                                                                                                                                                                                         |
+| Caching: rarely changing data   | Event pages and public listings: Redis read-through keyed by **generation counters**, bumped after commit on every write. A slow reader can only write stale data under a generation nobody reads any more.                                                                                                                                                                      |
+| Rate limiting                   | Per client IP on the whole API, a Redis token bucket shared by all instances. Also per user on holds and per account on login. `TRUST_PROXY=loopback` makes the IP the real client's, and clients can't spoof it.                                                                                                                                                                |
+| Connection pooling              | `DB_POOL_MAX` per process (3 × 20 + worker 10 < Postgres' 100). A request waits at most 5 s for a connection, then gets **503 + Retry-After** instead of hanging. Postgres itself kills statements after 15 s and abandoned transactions after 30 s.                                                                                                                             |
+| Stateless instances             | Sessions, holds, rate limits, caches, idempotency keys, fan-out and the fake gateway's state all live in Postgres or Redis. Any instance can serve any request, and killing one loses nothing.                                                                                                                                                                                   |
+
+### Load test results
+
+k6 (`scripts/loadtest/flash-sale.js`): buyers arrive at a fixed rate; each loads the seat map and tries to hold 1–2 random seats of a 2,000-seat event. 3 API instances + worker behind Nginx, **everything including k6 on one fanless MacBook Air (M2, 8 GB)**, so these are lower bounds.
+
+| Arrival rate                 | Requests/s | 5xx       | Hold p95 | Seat map p95 | Notes                                                                            |
+| ---------------------------- | ---------- | --------- | -------- | ------------ | -------------------------------------------------------------------------------- |
+| 300 buyers/s                 | 503        | 0         | 15 ms    | 10 ms        | 1,937 seats held; 13,613 correct 409s once sold out                              |
+| 600 buyers/s                 | 992        | 0         | 95 ms    | 15 ms        | sold out (1,996 of 2,000)                                                        |
+| 1,000 buyers/s (first run)   | 460        | **3,746** | 4.1 s    | 3.5 s        | **cascading failure**, see below                                                 |
+| 1,000 buyers/s (after fixes) | **1,197**  | **0**     | 1.4 s    | 0.4 s        | at the laptop's ceiling (CPU + thermal throttling): latency rises, nothing fails |
+
+After every run, `npm run check:invariants` reported zero violations: no seat sold twice, even through the overload.
+
+**What the first 1,000/s run taught:**
+
+1. **Nginx turned graceful overload into an outage.** The API shed load with 503 + Retry-After when its pool was busy, but `proxy_next_upstream http_503` made Nginx count those as server failures. After `max_fails`, it marked all three instances dead and answered everything with 502 "no live upstreams". The fix: only retry connection errors (`proxy_next_upstream error timeout`).
+2. **`NOTIFY` on every hold serialized commits.** Each hold's outbox row (its 10-minute expiry job) fired `pg_notify`, which takes a global lock at commit. Migration 0006 notifies only for jobs that are due now.
+3. **Retries need idempotency.** k6 counted 1,942 held seats and the database had 1,944: two holds committed but their responses were lost in the outage. A client retrying with the same `Idempotency-Key` gets exactly those bookings back.
 
 ## Exercise: watch an index work
 

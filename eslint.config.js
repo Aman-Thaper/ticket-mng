@@ -38,5 +38,18 @@ export default tseslint.config(
     files: ['**/*.js'],
     languageOptions: { globals: { ...globals.node } },
   },
+  {
+    // k6 scripts run in k6's JavaScript runtime, which provides these globals.
+    files: ['scripts/loadtest/**/*.js'],
+    languageOptions: {
+      sourceType: 'module',
+      globals: { open: 'readonly', __ENV: 'readonly', __VU: 'readonly', __ITER: 'readonly' },
+    },
+  },
+  {
+    // The demo pages run in the browser.
+    files: ['public/**/*.js'],
+    languageOptions: { sourceType: 'module', globals: { ...globals.browser } },
+  },
   prettier,
 );

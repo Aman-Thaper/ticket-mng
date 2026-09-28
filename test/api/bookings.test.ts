@@ -179,7 +179,7 @@ describe('bookings', () => {
 
       await lapse(booking.id);
       const changes = await expireBooking(booking.id);
-      expect(changes).toEqual([{ id: seatIds[0], status: 'available', version: 2 }]);
+      expect(changes).toEqual([{ id: seatIds[0], eventId, status: 'available', version: 2 }]);
       expect(await expireBooking(booking.id)).toEqual([]);
 
       const row = await db

@@ -255,7 +255,15 @@ try {
     FROM (SELECT booking_id, unnest(seat_ids) AS seat_id FROM seed_orders) s
     WHERE es.id = s.seat_id
   `.execute(db);
-  log(`bookings: ${orders.numAffectedRows} confirmed, covering ${sold.numAffectedRows} sold seats`);
+  // A confirmed booking has one valid ticket per seat (checked by npm run check:invariants).
+  await sql`
+    INSERT INTO tickets (booking_id, event_id, event_seat_id, created_at)
+    SELECT o.booking_id, o.event_id, s.id, now()
+    FROM seed_orders o CROSS JOIN unnest(o.seat_ids) AS s(id)
+  `.execute(db);
+  log(
+    `bookings: ${orders.numAffectedRows} confirmed, covering ${sold.numAffectedRows} sold seats (with tickets)`,
+  );
 
   // Some far-off shows aren't on sale yet: tickets go on sale 30 days before.
   await sql`

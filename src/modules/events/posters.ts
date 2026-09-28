@@ -2,6 +2,8 @@ import { z } from 'zod';
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { config } from '../../config.js';
 import { db } from '../../db/index.js';
+import { withTransaction } from '../../db/transaction.js';
+import { generationKey, invalidate } from '../../lib/cache.js';
 import { enqueue } from '../../jobs/outbox.js';
 import { notFound, unprocessable } from '../../lib/errors.js';
 import { errors, IdParams, Timestamp } from '../../lib/schemas.js';
@@ -86,12 +88,13 @@ export const posterRoutes: FastifyPluginAsyncZod = async (app) => {
       if (object.size > config.POSTER_MAX_BYTES)
         throw unprocessable('UPLOAD_TOO_LARGE', 'The uploaded file is too large');
 
-      await db.transaction().execute(async (trx) => {
+      await withTransaction(async (trx) => {
         await trx
           .updateTable('events')
           .set({ posterStatus: 'processing', posterKey: key, posterError: null })
           .where('id', '=', event.id)
           .execute();
+        invalidate(generationKey.event(event.id), generationKey.eventLists);
         await enqueue(
           trx,
           'media',

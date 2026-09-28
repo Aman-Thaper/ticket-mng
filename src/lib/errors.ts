@@ -110,6 +110,16 @@ export function errorHandler(err: FastifyError, req: FastifyRequest, reply: Fast
     });
   }
 
+  // Overload, not a bug: the pool had no free connection in time, or Postgres cancelled a
+  // statement that ran past statement_timeout. Tell the client to back off and retry.
+  if (err.message === 'timeout exceeded when trying to connect' || pgErr?.code === '57014') {
+    req.log.warn({ err }, 'database overloaded');
+    reply.header('retry-after', 2);
+    return reply.status(503).send({
+      error: { code: 'SERVICE_BUSY', message: 'The service is busy; please retry shortly' },
+    });
+  }
+
   if (isResponseSerializationError(err)) {
     req.log.error({ err }, 'response failed schema validation');
     return reply.status(500).send({

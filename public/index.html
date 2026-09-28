@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ticket MNG · Live seat map</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <strong>Ticket MNG</strong>
+        <span class="muted">live seat map</span>
+      </div>
+      <div id="auth">
+        <form id="login-form" class="inline-form" autocomplete="on">
+          <input id="login-email" type="email" placeholder="email" value="user7@example.com" required />
+          <input id="login-password" type="password" placeholder="password" value="password123" required />
+          <button type="submit">Log in</button>
+        </form>
+        <div id="session" hidden>
+          <span id="session-name"></span>
+          <button id="logout" class="secondary" type="button">Log out</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel map-panel" aria-labelledby="event-title">
+        <div class="panel-head">
+          <label class="event-picker">
+            <span class="muted">Event</span>
+            <select id="event-select" aria-label="Choose an event"></select>
+          </label>
+          <span id="live-status" class="pill" role="status" aria-live="polite">connecting…</span>
+        </div>
+        <h1 id="event-title">Loading events…</h1>
+        <p id="event-meta" class="muted"></p>
+        <div class="legend" aria-hidden="true">
+          <span><i class="dot available"></i>available</span>
+          <span><i class="dot held"></i>held</span>
+          <span><i class="dot booked"></i>sold</span>
+          <span><i class="dot selected"></i>your selection</span>
+          <span id="counts" class="muted"></span>
+        </div>
+        <div id="map-scroll" class="map-scroll">
+          <svg id="seat-map" role="group" aria-label="Seat map"></svg>
+        </div>
+        <p id="map-tooltip" class="muted tooltip" aria-live="polite">&nbsp;</p>
+      </section>
+
+      <aside class="panel checkout" aria-labelledby="checkout-title">
+        <h2 id="checkout-title">Your seats</h2>
+        <ul id="selection" class="selection"></ul>
+        <p id="selection-total" class="total"></p>
+        <button id="hold-button" type="button" disabled>Hold seats</button>
+
+        <div id="booking" hidden>
+          <h3>Booking <span id="booking-status" class="pill"></span></h3>
+          <p id="countdown" class="countdown" aria-live="polite"></p>
+          <label>
+            <span class="muted">Test card</span>
+            <select id="card">
+              <option value="4242424242424242">4242… succeeds</option>
+              <option value="4000000000000077">…0077 processing, then succeeds</option>
+              <option value="4000000000000002">…0002 declined</option>
+              <option value="4000000000009995">…9995 insufficient funds</option>
+            </select>
+          </label>
+          <div class="row">
+            <button id="pay-button" type="button">Pay</button>
+            <button id="cancel-button" type="button" class="secondary">Cancel hold</button>
+          </div>
+          <div id="tickets" class="tickets"></div>
+        </div>
+
+        <p id="message" class="message" role="alert"></p>
+
+        <details class="log">
+          <summary>Activity</summary>
+          <ol id="log"></ol>
+        </details>
+      </aside>
+    </main>
+  </body>
+</html>
