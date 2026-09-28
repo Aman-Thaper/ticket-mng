@@ -144,7 +144,9 @@ jobs:
       - name: Load smoke test (k6)
         run: |
           npm run loadtest:setup -- --users 1000
-          RATE=50 DURATION_SCALE=0.5 k6 run scripts/loadtest/flash-sale.js
+          # Correctness gates stay strict (no 5xx, then the invariant audit below). Latency limits
+          # are loose: a shared 2-vCPU runner hosts k6 and every service at once.
+          RATE=50 DURATION_SCALE=0.5 HOLD_P95_MS=3000 SEATMAP_P95_MS=2000 k6 run scripts/loadtest/flash-sale.js
       - name: Zero-downtime rollout (replace every API replica under traffic; no request may fail)
         run: |
           k6 run --quiet scripts/loadtest/rollout-probe.js &

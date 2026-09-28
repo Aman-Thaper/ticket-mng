@@ -39,8 +39,10 @@ export const options = {
   },
   thresholds: {
     server_errors: ['count==0'],
-    'http_req_duration{name:hold}': ['p(95)<750'],
-    'http_req_duration{name:seatmap}': ['p(95)<500'],
+    // Latency limits are for measuring on a known machine. Shared CI runners (2 vCPUs running
+    // k6 and the whole stack) set looser ones: there, correctness is the gate, not speed.
+    'http_req_duration{name:hold}': [`p(95)<${__ENV.HOLD_P95_MS || 750}`],
+    'http_req_duration{name:seatmap}': [`p(95)<${__ENV.SEATMAP_P95_MS || 500}`],
   },
   summaryTrendStats: ['avg', 'med', 'p(95)', 'p(99)', 'max'],
 };
