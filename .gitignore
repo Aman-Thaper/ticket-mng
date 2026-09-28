@@ -4,3 +4,7 @@ dist/
 *.log
 .DS_Store
 .dev/
+
+# Secrets for a real deployment (see deploy/.env.production.example)
+.env.*
+!*.example

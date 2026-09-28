@@ -1,0 +1,164 @@
+# The whole system on one machine:
+#
+#   docker compose up -d --build            → http://localhost:8080 (seat map), /docs (API)
+#   docker compose --profile monitoring up -d  (+ Prometheus :9090, Grafana :3030)
+#   docker compose down                      (add -v to also delete the data volumes)
+#
+# 3 API replicas behind Nginx, 1 worker, Postgres, Redis, MinIO (S3) and Mailpit (email
+# inbox at http://localhost:8025). Migrations run once, before the API and worker start.
+#
+# This is a local/demo stack: NODE_ENV=development allows the built-in fake payment gateway
+# and the committed dev secrets (both are refused when NODE_ENV=production). For a real
+# deployment, layer deploy/docker-compose.prod.yml on top (see docs/DEPLOY.md).
+name: ticket-mng
+
+x-app: &app
+  build: .
+  image: ticket-mng:local
+  restart: unless-stopped
+  environment: &app-env
+    NODE_ENV: development
+    LOG_LEVEL: info
+    APP_URL: http://localhost:8080
+    DATABASE_URL: postgres://ticket:ticket@postgres:5432/ticket_mng
+    DB_POOL_MAX: '20'
+    REDIS_URL: redis://redis:6379/0
+    JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev-only-secret-do-not-use-in-production-0123456789}
+    TICKET_SIGNING_KEY: ${TICKET_SIGNING_KEY:-+mPtSKxHNhPA3r7ZOfCIbAdEMXWeVaymIJBr0hB2x3I=}
+    # Only the Nginx container sits in front of the API; trust X-Forwarded-For from this network only.
+    TRUST_PROXY: 10.77.0.0/24
+    COOKIE_SECURE: 'false'
+    # Containers reach MinIO by service name; browsers reach it through the published port.
+    S3_ENDPOINT: http://minio:9000
+    S3_PUBLIC_URL: http://localhost:9000
+    S3_ACCESS_KEY: minioadmin
+    S3_SECRET_KEY: minioadmin
+    SMTP_URL: smtp://mailpit:1025
+    PAYMENT_PROVIDER: fake
+    # The fake gateway delivers webhooks through the load balancer, like a real provider.
+    FAKE_GATEWAY_WEBHOOK_URL: http://nginx/api/v1/webhooks/fake
+    # Per-client-IP limit; load tests from one machine raise it (all their traffic has one IP).
+    RATE_LIMIT_IP_CAPACITY: ${RATE_LIMIT_IP_CAPACITY:-120}
+    RATE_LIMIT_IP_REFILL_PER_SEC: ${RATE_LIMIT_IP_REFILL_PER_SEC:-30}
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ticket
+      POSTGRES_PASSWORD: ticket
+      POSTGRES_DB: ticket_mng
+    # 3 API replicas × 20 + worker 10 + listener, plus headroom for psql and scripts.
+    command: ['postgres', '-c', 'max_connections=200', '-c', 'shared_buffers=256MB']
+    volumes: ['pgdata:/var/lib/postgresql']
+    ports: ['5433:5432'] # host access for seeding/scripts (5432 may already be a local Postgres)
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ticket -d ticket_mng']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:8
+    # noeviction: BullMQ's job keys must never be evicted under memory pressure.
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    volumes: ['redisdata:/data']
+    ports: ['6380:6379'] # host access for scripts (6379 may already be a local Redis)
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  minio:
+    # MinIO archived its community edition in 2025 and stopped publishing images; Bitnami's
+    # frozen legacy build still works for local S3. The app only speaks the generic S3 API:
+    # in production point S3_* at AWS S3, Cloudflare R2, or another S3-compatible store.
+    image: bitnamilegacy/minio:latest
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    # Browsers upload posters here directly (presigned POST) and load the resized images.
+    ports: ['9000:9000', '9001:9001']
+    volumes: ['miniodata:/bitnami/minio/data']
+    healthcheck:
+      test: ['CMD', 'curl', '-sf', 'http://localhost:9000/minio/health/live']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports: ['8025:8025'] # inbox UI
+
+  migrate:
+    <<: *app
+    command: ['node', 'dist/db/migrate.js', 'latest']
+    restart: 'no'
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    <<: *app
+    command: ['node', 'dist/server.js']
+    deploy:
+      replicas: 3
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+
+  worker:
+    <<: *app
+    command: ['node', 'dist/worker.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3100/health/ready').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+
+  nginx:
+    image: nginx:1.28-alpine
+    ports: ['8080:80']
+    volumes:
+      - ./deploy/nginx/compose.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/api-upstream.sh:/docker-entrypoint.d/15-api-upstream.sh:ro
+    depends_on:
+      api: { condition: service_healthy }
+
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ['monitoring']
+    volumes: ['./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro']
+    ports: ['9090:9090']
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ['monitoring']
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes: ['./deploy/monitoring/grafana:/etc/grafana/provisioning:ro']
+    ports: ['3030:3000']
+
+networks:
+  default:
+    ipam:
+      config: [{ subnet: 10.77.0.0/24 }]
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

@@ -2,3 +2,4 @@ dist/
 coverage/
 .dev/
 package-lock.json
+dist/

@@ -1,0 +1,168 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '24'
+  # Test-only secrets: nothing real, but the config refuses to start without them.
+  JWT_ACCESS_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
+
+jobs:
+  checks:
+    name: Lint, format, types, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm run build
+
+  test:
+    name: Tests (Postgres, Redis, MinIO, stripe-mock)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ticket
+          POSTGRES_PASSWORD: ticket
+          POSTGRES_DB: ticket_mng_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ticket" --health-interval 3s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:8
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 3s --health-timeout 3s --health-retries 20
+      # S3-compatible storage for the poster upload tests (see docker-compose.yml on why Bitnami's image).
+      minio:
+        image: bitnamilegacy/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports: ['9000:9000']
+        options: >-
+          --health-cmd "curl -sf http://localhost:9000/minio/health/live" --health-interval 3s --health-timeout 3s --health-retries 30
+      # Stripe's official mock of its API: validates our requests against Stripe's OpenAPI spec.
+      stripe-mock:
+        image: stripe/stripe-mock:latest
+        ports: ['12111:12111']
+    env:
+      DATABASE_URL: postgres://ticket:ticket@localhost:5432/ticket_mng_test
+      TEST_DATABASE_URL: postgres://ticket:ticket@localhost:5432/ticket_mng_test
+      TEST_REDIS_URL: redis://localhost:6379/15
+      S3_ENDPOINT: http://localhost:9000
+      S3_PUBLIC_URL: http://localhost:9000
+      STRIPE_MOCK_URL: http://localhost:12111
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Generate a throwaway ticket signing key
+        run: echo "TICKET_SIGNING_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+      - run: npm ci
+      - run: npm test
+
+  docker:
+    name: Docker image
+    needs: [checks, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Image name (registries require lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  smoke:
+    name: Full stack (compose + browser + k6 + rollout + invariants)
+    needs: [checks, test]
+    runs-on: ubuntu-latest
+    env:
+      # The scripts run on the runner and talk to the compose stack's published ports.
+      DATABASE_URL: postgres://ticket:ticket@localhost:5433/ticket_mng
+      REDIS_URL: redis://localhost:6380/0
+      JWT_ACCESS_SECRET: dev-only-secret-do-not-use-in-production-0123456789
+      TICKET_SIGNING_KEY: +mPtSKxHNhPA3r7ZOfCIbAdEMXWeVaymIJBr0hB2x3I=
+      # k6 sends everything from one IP: lift the per-IP limit for the whole job (the rollout
+      # step starts new replicas, which read this too).
+      RATE_LIMIT_IP_CAPACITY: '1000000'
+      RATE_LIMIT_IP_REFILL_PER_SEC: '1000000'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Start the stack (3 API replicas, worker, Nginx, Postgres, Redis, MinIO, Mailpit)
+        run: |
+          docker compose up -d --build
+          for _ in $(seq 1 90); do curl -sf http://localhost:8080/health/ready && exit 0; sleep 2; done
+          echo "stack never became ready" >&2; exit 1
+      - name: Browser end-to-end (live seat map, hold, pay, tickets)
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
+      - uses: grafana/setup-k6-action@v1
+      - name: Load smoke test (k6)
+        run: |
+          npm run loadtest:setup -- --users 1000
+          RATE=50 DURATION_SCALE=0.5 k6 run scripts/loadtest/flash-sale.js
+      - name: Zero-downtime rollout (replace every API replica under traffic; no request may fail)
+        run: |
+          k6 run --quiet scripts/loadtest/rollout-probe.js &
+          sleep 8
+          deploy/rollout.sh
+          wait $!
+      - name: Business invariants
+        run: npm run check:invariants
+      - name: Collect logs
+        if: failure()
+        run: docker compose logs --no-color > compose.log
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: smoke-diagnostics
+          path: |
+            compose.log
+            .dev/e2e-*.png
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

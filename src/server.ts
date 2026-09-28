@@ -1,10 +1,12 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import { config } from './config.js';
 import { buildApp } from './app.js';
 import { db } from './db/index.js';
+import { closeQueues } from './jobs/queues.js';
+import { lifecycle } from './lib/lifecycle.js';
 import { logger } from './lib/logger.js';
 import { redis } from './lib/redis.js';
 import { ensureBucket } from './lib/storage.js';
-import { closeQueues } from './jobs/queues.js';
 
 const app = await buildApp({ loggerInstance: logger });
 
@@ -13,15 +15,26 @@ async function closeResources() {
   await Promise.allSettled([db.destroy(), redis.quit()]);
 }
 
-// Graceful shutdown: stop accepting connections, let in-flight requests finish, then close
-// the database pool and Redis connection.
+// Graceful shutdown, in order:
+//   1. report not-ready (/health/ready → 503) so the load balancer stops sending traffic;
+//   2. wait SHUTDOWN_DRAIN_MS for it to notice;
+//   3. stop accepting connections, finish in-flight requests, tell WebSocket clients to
+//      reconnect elsewhere (close code 1001);
+//   4. close the database pool and Redis.
+// Rolling deploys therefore drop no requests.
+let stopping = false;
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
+    if (stopping) return;
+    stopping = true;
     app.log.info({ signal }, 'shutting down');
-    void app
-      .close()
-      .then(closeResources)
-      .then(() => process.exit(0));
+    lifecycle.beginShutdown();
+    void (async () => {
+      if (config.SHUTDOWN_DRAIN_MS) await sleep(config.SHUTDOWN_DRAIN_MS);
+      await app.close();
+      await closeResources();
+      process.exit(0);
+    })();
   });
 }
 

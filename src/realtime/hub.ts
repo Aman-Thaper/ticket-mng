@@ -1,4 +1,5 @@
 import type { WebSocket } from 'ws';
+import { gaugeFrom } from '../lib/metrics.js';
 import { createRedis } from '../lib/redis.js';
 import { logger } from '../lib/logger.js';
 import { seatChannel, type SeatTuple } from './seat-updates.js';
@@ -25,6 +26,13 @@ const MAX_CONNECTIONS = 20_000;
  * Nothing about subscribers is shared between instances, so any instance can serve any
  * client, and a crashed instance takes nothing with it: its clients reconnect elsewhere.
  */
+/** Every hub in this process (normally one; tests build several apps). */
+const hubs = new Set<LiveSeatHub>();
+
+gaugeFrom('websocket_connections', 'Live seat-map WebSocket connections on this instance', [], () => [
+  [{}, [...hubs].reduce((sum, hub) => sum + hub.stats().connections, 0)],
+]);
+
 export class LiveSeatHub {
   private readonly sockets = new Map<string, Set<WebSocket>>();
   private readonly pending = new Map<string, Map<number, SeatTuple>>();
@@ -37,6 +45,7 @@ export class LiveSeatHub {
   private connections = 0;
 
   constructor() {
+    hubs.add(this);
     this.subscriber.on('message', (channel: string, message: string) => this.onMessage(channel, message));
     this.heartbeat = setInterval(() => this.ping(), HEARTBEAT_MS);
     this.heartbeat.unref();
@@ -133,6 +142,7 @@ export class LiveSeatHub {
   }
 
   async close(): Promise<void> {
+    hubs.delete(this);
     clearInterval(this.heartbeat);
     if (this.flushTimer) clearTimeout(this.flushTimer);
     for (const viewers of this.sockets.values()) {

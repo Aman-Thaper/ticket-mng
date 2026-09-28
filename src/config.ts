@@ -15,6 +15,15 @@ const schema = z.object({
   HOST: z.string().default('0.0.0.0'),
   PORT: z.coerce.number().int().positive().default(3000),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  /** If set, GET /metrics requires "Authorization: Bearer <METRICS_TOKEN>". */
+  METRICS_TOKEN: z.string().min(16).optional(),
+  /**
+   * On SIGTERM, keep serving (while reporting not-ready) this long before closing, so the
+   * load balancer has time to notice and stop routing here.
+   */
+  SHUTDOWN_DRAIN_MS: z.coerce.number().int().min(0).default(0),
+  /** Port of the worker's small health/metrics server. */
+  WORKER_HTTP_PORT: z.coerce.number().int().positive().default(3100),
   /** Identifies this process in logs and the x-served-by header (defaults to host:pid). */
   INSTANCE_ID: z.string().optional(),
   /**

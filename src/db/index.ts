@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { CamelCasePlugin, Kysely, PostgresDialect } from 'kysely';
 import { config } from '../config.js';
+import { gaugeFrom } from '../lib/metrics.js';
 import type { DB } from './types.js';
 
 // By default pg returns int8 (bigint ids, count(*)) as strings. Our values stay far below
@@ -28,4 +29,17 @@ export const db = new Kysely<DB>({
   dialect: new PostgresDialect({ pool }),
   plugins: [new CamelCasePlugin()],
 });
+
+// "waiting" above zero means requests are queueing for a connection: the first sign that
+// the pool (or the database behind it) is the bottleneck.
+gaugeFrom(
+  'db_pool_connections',
+  'Postgres pool connections by state (waiting = requests queued for a connection)',
+  ['state'],
+  () => [
+    [{ state: 'total' }, pool.totalCount],
+    [{ state: 'idle' }, pool.idleCount],
+    [{ state: 'waiting' }, pool.waitingCount],
+  ],
+);
 export type Db = typeof db;

@@ -1,7 +1,7 @@
-import { hostname } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Fastify, { type FastifyServerOptions } from 'fastify';
+import Fastify, { LogController, type FastifyServerOptions } from 'fastify';
 import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
@@ -15,6 +15,8 @@ import {
 } from 'fastify-type-provider-zod';
 import { config } from './config.js';
 import { requestContext } from './lib/context.js';
+import { INSTANCE_ID } from './lib/logger.js';
+import { httpRequestDuration, httpRequestsInFlight } from './lib/metrics.js';
 import { enforce, type RateLimitRule } from './lib/rate-limit.js';
 import { LiveSeatHub } from './realtime/hub.js';
 import { errorHandler } from './lib/errors.js';
@@ -45,7 +47,16 @@ export interface AppOverrides {
   rateLimit?: { enabled: boolean; capacity?: number; refillPerSec?: number };
 }
 
-const INSTANCE_ID = config.INSTANCE_ID ?? `${hostname()}:${process.pid}`;
+/**
+ * Request id: reuse the one Nginx assigned (so its access log and ours line up), but only if
+ * it looks like an id. A client-controlled header must not be able to inject log lines.
+ */
+const VALID_REQUEST_ID = /^[\w.-]{1,128}$/;
+const genReqId = (req: { headers: Record<string, string | string[] | undefined> }) => {
+  const incoming = req.headers['x-request-id'];
+  return typeof incoming === 'string' && VALID_REQUEST_ID.test(incoming) ? incoming : randomUUID();
+};
+
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 /** Browser security policy for the demo pages: only our own scripts, styles and API. */
@@ -68,7 +79,28 @@ const trustProxy =
 
 export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOverrides = {}) {
   // trustProxy decides whose X-Forwarded-For to believe (see TRUST_PROXY in config.ts).
-  const app = Fastify({ ...opts, trustProxy }).withTypeProvider<ZodTypeProvider>();
+  const app = Fastify({
+    genReqId,
+    logController: new LogController({ requestIdLogLabel: 'requestId' }),
+    ...opts,
+    trustProxy,
+  }).withTypeProvider<ZodTypeProvider>();
+
+  // RED metrics (rate, errors, duration) per route template, for every request.
+  app.addHook('onRequest', async () => {
+    httpRequestsInFlight.inc();
+  });
+  app.addHook('onResponse', async (req, reply) => {
+    httpRequestsInFlight.dec();
+    httpRequestDuration.observe(
+      {
+        method: req.method,
+        route: req.routeOptions.url ?? 'unmatched',
+        status_code: String(reply.statusCode),
+      },
+      reply.elapsedTime / 1000,
+    );
+  });
 
   app.decorate('bookingOptions', {
     strategy: config.HOLD_STRATEGY,
@@ -97,9 +129,10 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
     });
   }
 
-  // Which instance answered: handy for watching the load balancer spread requests.
-  app.addHook('onSend', async (_req, reply) => {
-    reply.header('x-served-by', INSTANCE_ID);
+  // Which instance answered (handy for watching the load balancer spread requests), and the
+  // request id to quote in a bug report.
+  app.addHook('onSend', async (req, reply) => {
+    reply.header('x-served-by', INSTANCE_ID).header('x-request-id', req.id);
   });
 
   // Live seat maps. The hub keeps this instance's WebSocket clients and one Redis

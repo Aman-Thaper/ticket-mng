@@ -1,0 +1,15 @@
+node_modules
+dist
+.dev
+.git
+.github
+coverage
+test
+scripts
+deploy
+docs
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store

@@ -14,6 +14,7 @@ import { chromium, type Page } from 'playwright';
 import { sql } from 'kysely';
 import { db } from '../src/db/index.js';
 import { redis } from '../src/lib/redis.js';
+import { hashPassword } from '../src/modules/auth/passwords.js';
 import { generateSeats } from '../src/modules/venues/layout.js';
 
 const { values } = parseArgs({
@@ -28,6 +29,18 @@ const organizer = await db
   .values({ email: `${tag}@example.com`, name: 'E2E Organizer', role: 'organizer' })
   .returning('id')
   .executeTakeFirstOrThrow();
+// Our own buyer with a known password, so the test works on an empty database too.
+const buyerEmail = `${tag}-buyer@example.com`;
+const buyerPassword = 'e2e password 123';
+await db
+  .insertInto('users')
+  .values({
+    email: buyerEmail,
+    name: 'E2E Buyer',
+    role: 'attendee',
+    passwordHash: await hashPassword(buyerPassword),
+  })
+  .execute();
 const sections = [
   { name: 'Stalls', rows: 6, seatsPerRow: 14 },
   { name: 'Circle', rows: 4, seatsPerRow: 10 },
@@ -95,7 +108,9 @@ try {
   const buyer = await open('buyer');
   step(`both pages loaded the seat map (${await buyer.locator('rect.seat').count()} seats) and went live`);
 
-  await buyer.locator('#login-form button[type=submit]').click(); // demo credentials are prefilled
+  await buyer.locator('#login-email').fill(buyerEmail);
+  await buyer.locator('#login-password').fill(buyerPassword);
+  await buyer.locator('#login-form button[type=submit]').click();
   await buyer.locator('#session-name').filter({ hasText: '@' }).waitFor();
   step(`buyer logged in as ${await buyer.locator('#session-name').textContent()}`);
 

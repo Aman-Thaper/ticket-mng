@@ -5,6 +5,7 @@ import { db } from '../../db/index.js';
 import { DEAD_LETTER_QUEUE, getQueue, QUEUE_NAMES, type QueueName } from '../../jobs/queues.js';
 import type { DeadLetter } from '../../jobs/runner.js';
 import { notFound } from '../../lib/errors.js';
+import { checkInvariants, INVARIANT_NAMES } from '../../lib/invariants.js';
 import { errors, Limit } from '../../lib/schemas.js';
 import { bearerAuth, requireRole } from '../auth/guard.js';
 
@@ -57,6 +58,40 @@ export const adminRoutes: FastifyPluginAsyncZod = async (app) => {
         .where('publishedAt', 'is', null)
         .executeTakeFirstOrThrow();
       return { queues, outbox };
+    },
+  );
+
+  app.get(
+    '/admin/invariants',
+    {
+      schema: {
+        tags: ['admin'],
+        summary: 'Audit the business rules (no seat sold twice, no money kept for nothing, ...)',
+        description:
+          'Runs one query per rule over the whole database, so it can take a while on a big one: ' +
+          'run it after incidents, deploys or load tests, not on a schedule.',
+        security: bearerAuth,
+        response: {
+          200: z.object({
+            ok: z.boolean(),
+            checked: z.array(z.string()),
+            violations: z.array(
+              z.object({
+                name: z.string(),
+                description: z.string(),
+                count: z.int(),
+                sample: z.array(z.unknown()),
+              }),
+            ),
+          }),
+          ...errors,
+        },
+      },
+    },
+    async () => {
+      const violations = await checkInvariants(db);
+      if (violations.length) app.log.error({ violations }, 'business invariants violated');
+      return { ok: violations.length === 0, checked: INVARIANT_NAMES, violations };
     },
   );
 

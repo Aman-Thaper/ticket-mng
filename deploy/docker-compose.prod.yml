@@ -1,0 +1,114 @@
+# Production overrides, layered on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml --env-file .env.production up -d
+#
+# Differences from the local stack:
+#   - NODE_ENV=production: the fake payment gateway and the committed dev secrets are refused
+#   - runs the image CI pushed (IMAGE), rather than building on the server
+#   - secrets come from .env.production (never committed); Stripe for payments
+#   - nothing is published on the host except Nginx (80/443); monitoring UIs on 127.0.0.1 only
+#   - no MinIO or Mailpit: use managed S3-compatible storage and a real SMTP service
+#   - Nginx terminates HTTPS with Let's Encrypt certificates (certbot renews them)
+#   - log rotation and resource limits, so one noisy container can't take the box down
+
+x-prod-app: &prod-app
+  image: ${IMAGE:?set IMAGE, e.g. ghcr.io/you/ticket-mng:<git sha>}
+  build: !reset null
+  restart: always
+  env_file: [.env.production]
+  # !override, not a merge: in Compose, `environment` beats `env_file`, so inheriting the base
+  # file's dev values (DATABASE_URL, dev JWT secret, ...) would silently mask .env.production.
+  environment: !override
+    NODE_ENV: production
+    TRUST_PROXY: 10.77.0.0/24
+    COOKIE_SECURE: 'true'
+    PAYMENT_PROVIDER: stripe
+    S3_AUTO_CREATE_BUCKET: 'false'
+    # Everything else (APP_URL, DATABASE_URL, REDIS_URL, JWT_ACCESS_SECRET, TICKET_SIGNING_KEY,
+    # STRIPE_*, S3_*, SMTP_URL, MAIL_FROM, METRICS_TOKEN) comes from .env.production.
+  logging:
+    driver: json-file
+    options: { max-size: '20m', max-file: '5' }
+
+services:
+  postgres:
+    ports: !reset []
+    restart: always
+    # Credentials come from .env.production (POSTGRES_USER/PASSWORD/DB), not the dev defaults.
+    env_file: [.env.production]
+    environment: !reset {}
+    logging:
+      driver: json-file
+      options: { max-size: '20m', max-file: '5' }
+
+  redis:
+    ports: !reset []
+    restart: always
+
+  minio:
+    profiles: ['local-only']
+
+  mailpit:
+    profiles: ['local-only']
+
+  migrate:
+    <<: *prod-app
+    restart: 'no'
+
+  api:
+    <<: *prod-app
+    deploy:
+      replicas: 3
+      resources:
+        limits: { cpus: '1.0', memory: 512M }
+    depends_on: !override
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  worker:
+    <<: *prod-app
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 768M }
+    depends_on: !override
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+
+  nginx:
+    restart: always
+    ports: !override ['80:80', '443:443']
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN, e.g. tickets.example.com}
+    volumes: !override
+      - ./deploy/nginx/prod.conf:/etc/nginx/nginx.conf:ro
+      # The official image renders /etc/nginx/templates/*.template with env vars into conf.d/.
+      - ./deploy/nginx/templates:/etc/nginx/templates:ro
+      - ./deploy/nginx/api-upstream.sh:/docker-entrypoint.d/15-api-upstream.sh:ro
+      - ./deploy/nginx/reload-certs.sh:/docker-entrypoint.d/90-reload-certs.sh:ro
+      - letsencrypt:/etc/letsencrypt:ro
+      - acme:/var/www/acme:ro
+
+  certbot:
+    image: certbot/certbot:latest
+    restart: always
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - acme:/var/www/acme
+    # Try renewal twice a day; certbot only renews certificates close to expiry.
+    entrypoint:
+      [
+        'sh',
+        '-c',
+        'trap exit TERM; while :; do certbot renew --webroot -w /var/www/acme --quiet; sleep 12h & wait $${!}; done',
+      ]
+
+  # Optional (--profile monitoring). Only on the server's loopback interface: reach them through
+  # an SSH tunnel. Docker's published ports bypass ufw, so 0.0.0.0 would mean the whole internet.
+  prometheus:
+    ports: !override ['127.0.0.1:9090:9090']
+  grafana:
+    ports: !override ['127.0.0.1:3030:3000']
+
+volumes:
+  letsencrypt:
+  acme:

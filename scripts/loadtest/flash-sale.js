@@ -14,6 +14,9 @@ import { Counter } from 'k6/metrics';
 const data = JSON.parse(open(__ENV.LOADTEST_FILE || '../../.dev/loadtest.json'));
 const BASE = __ENV.BASE_URL || data.baseUrl;
 const RATE = Number(__ENV.RATE || 400);
+// Shrink or stretch the whole run (CI uses 0.5 for a ~30 s smoke test).
+const SCALE = Number(__ENV.DURATION_SCALE || 1);
+const secs = (s) => `${Math.max(1, Math.round(s * SCALE))}s`;
 const tokens = new SharedArray('tokens', () => data.tokens);
 const seatIds = new SharedArray('seats', () => data.seatIds);
 
@@ -28,9 +31,9 @@ export const options = {
       preAllocatedVUs: 200,
       maxVUs: 2000,
       stages: [
-        { duration: '10s', target: RATE },
-        { duration: '40s', target: RATE },
-        { duration: '10s', target: 0 },
+        { duration: secs(10), target: RATE },
+        { duration: secs(40), target: RATE },
+        { duration: secs(10), target: 0 },
       ],
     },
   },

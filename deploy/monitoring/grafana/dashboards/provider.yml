@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: ticket-mng
+    folder: Ticket MNG
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards

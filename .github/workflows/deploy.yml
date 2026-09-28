@@ -1,0 +1,55 @@
+# Deploy a CI-built image to the VPS (see docs/DEPLOY.md for the one-time server setup).
+#
+# Needs repository secrets: VPS_HOST, VPS_USER, VPS_SSH_KEY (a key allowed to log in as
+# VPS_USER), and a variable DOMAIN. Run it from the Actions tab, choosing the commit SHA to
+# deploy (its image must already be in GHCR, which the CI workflow pushes on main).
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Commit SHA to deploy (its image must exist in GHCR)'
+        required: true
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        env:
+          SHA: ${{ inputs.sha }}
+          DOMAIN: ${{ vars.DOMAIN }}
+          REPO: ${{ github.repository }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: SHA,DOMAIN,REPO
+          script: |
+            set -euo pipefail
+            cd /srv/ticket-mng
+            git fetch --quiet origin
+            git checkout --quiet "$SHA"
+            export IMAGE="ghcr.io/${REPO,,}:$SHA" DOMAIN="$DOMAIN"
+            export COMPOSE="docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml --env-file .env.production"
+            $COMPOSE pull migrate api worker
+            # 1. Migrations first. They only ever add things, so the running release keeps working.
+            $COMPOSE run --rm migrate
+            # 2. API: new replicas up and healthy before the old ones stop; no request is dropped.
+            deploy/rollout.sh
+            # 3. Everything else: the worker (its jobs wait in Redis meanwhile), Nginx, certbot.
+            $COMPOSE up -d --remove-orphans
+            for _ in $(seq 1 30); do curl -sf "https://$DOMAIN/health/ready" && exit 0; sleep 2; done
+            echo "deployment did not become ready" >&2
+            $COMPOSE ps
+            exit 1

@@ -30,6 +30,8 @@ async function authenticate(req: FastifyRequest): Promise<AuthUser> {
   if (await isSessionRevoked(claims.sid)) {
     throw unauthorized('SESSION_REVOKED', 'Session has been revoked; please log in again');
   }
+  // Every later log line for this request (including "request completed") names the user.
+  req.log = req.log.child({ userId: claims.sub });
   return { id: claims.sub, role: claims.role, sessionId: claims.sid };
 }
 

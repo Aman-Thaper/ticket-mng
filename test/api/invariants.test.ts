@@ -104,5 +104,26 @@ describe('business invariants', () => {
 
     const names = (await checkInvariants(db)).map((v) => v.name);
     expect(names).toEqual(expect.arrayContaining(['seat_sold_twice', 'paid_but_nothing_delivered']));
+
+    // Operators get the same audit over HTTP.
+    const admin = await createUser('admin');
+    const res = await t.app.inject({ url: '/api/v1/admin/invariants', headers: admin.auth });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ok).toBe(false);
+    expect(res.json().violations.map((v: { name: string }) => v.name)).toEqual(
+      expect.arrayContaining(['seat_sold_twice', 'paid_but_nothing_delivered']),
+    );
+  });
+
+  it('exposes the audit to admins only', async () => {
+    const [admin, attendee] = await Promise.all([createUser('admin'), createUser('attendee')]);
+    const audit = (user: TestUser) => t.app.inject({ url: '/api/v1/admin/invariants', headers: user.auth });
+
+    const res = await audit(admin);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, violations: [] });
+    expect(res.json().checked).toContain('seat_sold_twice');
+    expect((await audit(organizer)).statusCode).toBe(403);
+    expect((await audit(attendee)).statusCode).toBe(403);
   });
 });

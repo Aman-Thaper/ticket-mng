@@ -2,6 +2,7 @@ import { UnrecoverableError, Worker, type Job } from 'bullmq';
 import type { Logger } from 'pino';
 import { config } from '../config.js';
 import { logger } from '../lib/logger.js';
+import { jobDuration } from '../lib/metrics.js';
 import { DEAD_LETTER_QUEUE, getQueue, redisConnection, type JobMeta, type QueueName } from './queues.js';
 
 export type JobHandler<T = unknown> = (job: Job<T & JobMeta>, log: Logger) => Promise<unknown>;
@@ -75,12 +76,15 @@ export function createWorker(
         requestId: job.data._meta?.requestId ?? undefined,
       });
       const started = performance.now();
+      const elapsed = () => performance.now() - started;
       try {
         const result = await handler(job, log);
-        log.info({ ms: Math.round(performance.now() - started) }, 'job completed');
+        jobDuration.observe({ queue, job: job.name, outcome: 'completed' }, elapsed() / 1000);
+        log.info({ ms: Math.round(elapsed()) }, 'job completed');
         return result;
       } catch (err) {
-        log.warn({ err, ms: Math.round(performance.now() - started) }, 'job failed');
+        jobDuration.observe({ queue, job: job.name, outcome: 'failed' }, elapsed() / 1000);
+        log.warn({ err, ms: Math.round(elapsed()) }, 'job failed');
         throw err;
       }
     },
