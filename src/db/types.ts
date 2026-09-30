@@ -56,6 +56,8 @@ export interface UsersTable {
   role: Generated<UserRole>;
   passwordHash: string | null;
   passwordChangedAt: Date | null;
+  /** Null until the owner clicks the confirmation link; booking requires it. */
+  emailVerifiedAt: Date | null;
   createdAt: CreatedAt;
   updatedAt: UpdatedAt;
 }
@@ -75,6 +77,15 @@ export interface SessionsTable {
 export interface RefreshTokensTable {
   id: Generated<string>;
   sessionId: string;
+  tokenHash: Buffer;
+  createdAt: CreatedAt;
+  expiresAt: Date;
+  usedAt: Date | null;
+}
+
+export interface EmailVerificationTokensTable {
+  id: Generated<string>;
+  userId: string;
   tokenHash: Buffer;
   createdAt: CreatedAt;
   expiresAt: Date;
@@ -257,6 +268,7 @@ export interface DB {
   sessions: SessionsTable;
   refreshTokens: RefreshTokensTable;
   passwordResetTokens: PasswordResetTokensTable;
+  emailVerificationTokens: EmailVerificationTokensTable;
   venues: VenuesTable;
   venueSections: VenueSectionsTable;
   venueSeats: VenueSeatsTable;

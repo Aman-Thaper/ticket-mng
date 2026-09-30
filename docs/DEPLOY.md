@@ -125,6 +125,15 @@ The middle row is why step 2 exists. Nginx re-resolves `api` every 2 s, so for u
 | Dead jobs           | `GET /api/v1/admin/dead-letters` (admin), then `POST …/:id/retry` or `DELETE …/:id`                                                                                                                                                                                                                                                                                             |
 | Business invariants | `GET /api/v1/admin/invariants` (admin): no seat sold twice, no money kept without a ticket, ... Run it after incidents and deploys.                                                                                                                                                                                                                                             |
 
+## Email
+
+Confirmation links, password resets and the QR tickets all go out by email, so deliverability is part of the product: a ticket email in spam becomes a problem at the door.
+
+- **Use a transactional provider** (Postmark, Resend, Amazon SES, Mailgun, Brevo, ...) and put its SMTP credentials in `SMTP_URL`, e.g. `smtps://USERNAME:PASSWORD@smtp.postmarkapp.com:465`. URL-encode special characters in the username and password (`@` becomes `%40`).
+- **Send from your own domain:** `MAIL_FROM="Ticket MNG <tickets@yourdomain.com>"`. Add the provider's **SPF** and **DKIM** DNS records, and a **DMARC** record (start with `v=DMARC1; p=none; rua=mailto:you@yourdomain.com`). Without them, Gmail and Outlook file you under spam or reject the mail.
+- **Test with real inboxes** (Gmail and Outlook) before launch: sign up, confirm, buy a ticket, and check that the QR codes show inline.
+- Failed sends are retried with backoff and end up in the dead-letter queue, so an outage at the provider delays emails but doesn't lose them.
+
 ## Scaling beyond one box
 
 In roughly the order you'd need them:

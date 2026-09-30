@@ -29,7 +29,7 @@ cp .env.example .env && npm install
 DATABASE_URL=postgres://ticket:ticket@localhost:5433/ticket_mng REDIS_URL=redis://localhost:6380/0 npm run seed
 ```
 
-Then open http://localhost:8080 (seat map; log in with the prefilled demo account), http://localhost:8080/docs (API), http://localhost:8025 (emails). Add `docker compose --profile monitoring up -d` for Prometheus (:9090) and Grafana (:3030, dashboard included). `docker compose down` stops it; add `-v` to delete the data too.
+Then open http://localhost:8080. Log in as `user7@example.com` / `password123` (seeded, email already confirmed), or create an account: the confirmation email and, after a purchase, the email with your QR tickets land in Mailpit at http://localhost:8025. API docs are at http://localhost:8080/docs. Add `docker compose --profile monitoring up -d` for Prometheus (:9090) and Grafana (:3030, dashboard included). `docker compose down` stops it; add `-v` to delete the data too.
 
 **Native development** (fast reloads, debugger):
 
@@ -103,6 +103,8 @@ All routes are under `/api/v1`. Interactive docs are at `/docs`, and the raw spe
 | GET/DELETE      | `/auth/sessions[/:id]`                                | list and revoke your logged-in devices                                                                                  |
 | POST            | `/auth/password/change`                               | revokes your other sessions                                                                                             |
 | POST            | `/auth/password-reset/request`, `/confirm`            | emailed single-use token (30 min)                                                                                       |
+| POST            | `/auth/verify-email`                                  | confirm the email address with the token from the signup email (no login needed)                                        |
+| POST            | `/auth/verify-email/resend`                           | send a new confirmation link (3 an hour)                                                                                |
 | GET/PATCH       | `/users/me`                                           | your profile                                                                                                            |
 | GET             | `/users/:id`                                          | admin                                                                                                                   |
 | PATCH           | `/users/:id/role`                                     | admin; revokes the user's sessions                                                                                      |
@@ -116,7 +118,7 @@ All routes are under `/api/v1`. Interactive docs are at `/docs`, and the raw spe
 | DELETE          | `/events/:id`                                         | drafts only (others must be cancelled)                                                                                  |
 | GET             | `/events/:id/seats`                                   | seat map grouped by section, with x/y, price and status                                                                 |
 | GET (WebSocket) | `/events/:id/live`                                    | live seat updates: `hello`, then `[seatId, status, version]` batches                                                    |
-| POST            | `/events/:id/bookings`                                | hold seats for 10 min (pending booking); 409 if taken                                                                   |
+| POST            | `/events/:id/bookings`                                | hold seats for 10 min (pending booking); 409 if taken; 403 `EMAIL_NOT_VERIFIED` until the email is confirmed            |
 | GET             | `/bookings`, `/bookings/:id`                          | your bookings (cursor pagination) / one booking                                                                         |
 | POST            | `/bookings/:id/payment`                               | start paying: payment intent + client secret (idempotent per booking)                                                   |
 | POST            | `/bookings/:id/refund`                                | refund a confirmed booking (until 24 h before the event)                                                                |
@@ -140,7 +142,7 @@ All routes are under `/api/v1`. Interactive docs are at `/docs`, and the raw spe
 | ------ | ------------------------------------------------------------------------------------------------------- |
 | 400    | Malformed input (`VALIDATION_ERROR` with per-field `details`, `INVALID_CURSOR`)                         |
 | 401    | Missing, invalid or expired access token (`UNAUTHENTICATED`, with `WWW-Authenticate`)                   |
-| 403    | Authenticated but not allowed (`FORBIDDEN`)                                                             |
+| 403    | Not allowed (`FORBIDDEN`), or not yet (`EMAIL_NOT_VERIFIED`: confirm your email address first)          |
 | 404    | Resource doesn't exist, or you may not know it exists (other people's drafts)                           |
 | 409    | Conflicts with current state (`EMAIL_TAKEN`, `VENUE_TIME_CONFLICT`, `INVALID_STATUS_TRANSITION`, ...)   |
 | 422    | Well-formed but semantically invalid, e.g. a referenced venue doesn't exist or pricing misses a section |
@@ -148,6 +150,18 @@ All routes are under `/api/v1`. Interactive docs are at `/docs`, and the raw spe
 | 503    | Overloaded or momentarily conflicting (`SERVICE_BUSY`, `TRANSIENT_CONFLICT`), with `Retry-After`: retry |
 
 Every response carries `x-request-id` (send your own `X-Request-Id` to correlate); quote it when reporting a problem.
+
+## Accounts and ticket delivery
+
+The site has proper account pages: `/login`, `/signup`, `/forgot-password`, `/reset-password` and `/verify-email`. They include inline validation, a password strength meter, show/hide password, clear rate-limit messages, dark mode, and a mobile layout. After logging in you return to the page, and the seats, you came from.
+
+Tickets are delivered by email, to the address you log in with, so that address has to work:
+
+1. **Sign up.** You're logged in straight away and can browse, and a confirmation link is emailed to you.
+2. **Confirm.** Click the link. Until then the seat map shows a banner (with "resend") and booking is disabled.
+3. **Book and pay.** Your tickets appear on the page, and an email with one QR code per seat goes to that address. The QR images are embedded inline, so they show in Gmail, Outlook and Apple Mail, and are attached as PNGs too.
+
+Locally every email is caught by Mailpit (http://localhost:8025). To receive them in a real inbox, point `SMTP_URL` at a real mail server (see `.env.example` for Gmail, and [DEPLOY.md](docs/DEPLOY.md#email) for production). Why booking waits for the confirmation: [ADR 0011](docs/adr/0011-email-verification.md).
 
 ## Design notes
 

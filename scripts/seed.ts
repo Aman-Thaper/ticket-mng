@@ -67,8 +67,8 @@ try {
   )) {
     const roles = batch.map((i) => (i === 0 ? 'admin' : i % 50 === 0 ? 'organizer' : 'attendee'));
     const rows = await sql<{ id: string; role: string }>`
-      INSERT INTO users (email, name, role, password_hash, password_changed_at)
-      SELECT *, ${passwordHash}, now() FROM unnest(
+      INSERT INTO users (email, name, role, password_hash, password_changed_at, email_verified_at)
+      SELECT *, ${passwordHash}, now(), now() FROM unnest(
         ${batch.map((i) => (i === 0 ? 'admin@example.com' : `user${i}@example.com`))}::text[],
         ${batch.map(() => faker.person.fullName())}::text[],
         ${roles}::user_role[]

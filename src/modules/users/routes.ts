@@ -8,7 +8,7 @@ import { bearerAuth, currentUser, requireAuth, requireRole } from '../auth/guard
 import { denylistSessions, revokeSessions } from '../auth/sessions.js';
 import { toUserDto, UserDto } from './dto.js';
 
-const userColumns = ['id', 'email', 'name', 'role', 'createdAt'] as const;
+const userColumns = ['id', 'email', 'name', 'role', 'emailVerifiedAt', 'createdAt'] as const;
 
 export const userRoutes: FastifyPluginAsyncZod = async (app) => {
   app.get(

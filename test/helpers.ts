@@ -70,12 +70,20 @@ export interface TestUser {
 /**
  * A user with a real session and access token, created directly in the database. Only the
  * auth tests go through signup/login; everything else uses this, which is fast and isn't
- * subject to the signup rate limit.
+ * subject to the signup rate limit. Users have a confirmed email unless `verified: false`.
  */
-export async function createUser(role: UserRole = 'organizer'): Promise<TestUser> {
+export async function createUser(
+  role: UserRole = 'organizer',
+  { verified = true }: { verified?: boolean } = {},
+): Promise<TestUser> {
   const user = await db
     .insertInto('users')
-    .values({ email: `user${++seq}@example.com`, name: `User ${seq}`, role })
+    .values({
+      email: `user${++seq}@example.com`,
+      name: `User ${seq}`,
+      role,
+      emailVerifiedAt: verified ? new Date() : null,
+    })
     .returningAll()
     .executeTakeFirstOrThrow();
   const { accessToken } = await startSession(db, user, {});

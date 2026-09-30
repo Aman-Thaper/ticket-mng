@@ -9,6 +9,7 @@ import { config } from '../config.js';
 export interface Jobs {
   email: {
     'password-reset': { email: string };
+    'verify-email': { userId: string };
     'booking-confirmed': { bookingId: string };
     'event-reminder': { bookingId: string };
     'refund-processed': { refundId: string };

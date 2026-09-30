@@ -8,6 +8,7 @@ export const UserDto = z
     email: z.email(),
     name: z.string(),
     role: z.enum(USER_ROLES),
+    emailVerified: z.boolean().describe('Tickets are emailed, so booking needs a confirmed address'),
     createdAt: Timestamp,
   })
   .meta({ id: 'User' });
@@ -15,12 +16,13 @@ export const UserDto = z
 // Every response goes through an explicit DTO rather than returning rows directly, so
 // columns like password_hash can never leak by accident.
 export const toUserDto = (
-  u: Pick<User, 'id' | 'email' | 'name' | 'role' | 'createdAt'>,
+  u: Pick<User, 'id' | 'email' | 'name' | 'role' | 'emailVerifiedAt' | 'createdAt'>,
 ): z.infer<typeof UserDto> => ({
   id: u.id,
   email: u.email,
   name: u.name,
   role: u.role,
+  emailVerified: u.emailVerifiedAt !== null,
   createdAt: u.createdAt.toISOString(),
 });
 

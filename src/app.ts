@@ -60,6 +60,8 @@ const genReqId = (req: { headers: Record<string, string | string[] | undefined> 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 /** Browser security policy for the demo pages: only our own scripts, styles and API. */
+const ACCOUNT_PAGES = ['login', 'signup', 'forgot-password', 'reset-password', 'verify-email'] as const;
+
 const STATIC_CSP = [
   "default-src 'self'",
   "script-src 'self'",
@@ -190,7 +192,7 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
     }),
   );
 
-  // The demo pages (seat map, password reset). wildcard: false registers one route per
+  // The web pages (seat map, account pages). wildcard: false registers one route per
   // file, so unknown paths still reach our JSON 404 handler.
   await app.register(fastifyStatic, {
     root: PUBLIC_DIR,
@@ -201,6 +203,10 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
       reply.header('referrer-policy', 'no-referrer');
     },
   });
+  // The account pages at clean URLs: /login rather than /login.html.
+  for (const page of ACCOUNT_PAGES) {
+    app.get(`/${page}`, { schema: { hide: true } }, (_req, reply) => reply.sendFile(`${page}.html`));
+  }
 
   await app.register(healthRoutes);
   // The simulated payment provider's browser API (dev and test only; refused in production).

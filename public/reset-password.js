@@ -1,36 +1,60 @@
-// The reset token arrives in the URL fragment (#token=...). Fragments are never sent to
-// servers, so the token stays out of access logs and Referer headers. Remove it from the
-// address bar straight away so it doesn't linger in browser history either.
+import {
+  $,
+  applyValidationErrors,
+  bindPasswordToggle,
+  bindStrengthMeter,
+  clearErrors,
+  focusFirstError,
+  renderHeroSeats,
+  setBusy,
+  setFieldError,
+  showAlert,
+} from './auth-ui.js';
+import { api, describeError } from './session.js';
+
+renderHeroSeats($('hero-seats'));
+bindPasswordToggle($('password'), $('toggle-password'));
+bindStrengthMeter($('password'), $('strength'));
+
+// The token arrives in the URL fragment (#token=...), which browsers never send to servers,
+// so it stays out of access logs and Referer headers. Drop it from the address bar at once
+// so it doesn't linger in history either.
 const token = new URLSearchParams(location.hash.slice(1)).get('token');
 history.replaceState(null, '', location.pathname);
 
-const form = document.getElementById('reset-form');
-const message = document.getElementById('message');
-
-if (!token) {
-  form.hidden = true;
-  message.textContent = 'This link is missing its reset token. Request a new email.';
+function show(view) {
+  for (const id of ['form-view', 'done-view', 'error-view']) $(id).hidden = id !== view;
 }
 
-form.addEventListener('submit', async (e) => {
+if (!token) {
+  $('error-text').textContent =
+    'This link is incomplete. Request a new one, and open the link from the latest email.';
+  show('error-view');
+} else {
+  $('password').focus();
+}
+
+$('form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const password = document.getElementById('password').value;
-  if (password !== document.getElementById('confirm').value) {
-    message.textContent = "The passwords don't match.";
-    return;
+  const form = e.currentTarget;
+  clearErrors(form);
+  showAlert($('alert'), 'error');
+
+  const newPassword = $('password').value;
+  if (newPassword.length < 8) {
+    setFieldError($('password'), 'Use at least 8 characters.');
+    return focusFirstError(form);
   }
-  const res = await fetch('/api/v1/auth/password-reset/confirm', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ token, newPassword: password }),
-  });
-  if (res.status === 204) {
-    form.hidden = true;
-    message.classList.add('ok');
-    message.textContent =
-      'Password changed. Every existing session was logged out; log in with the new password.';
-  } else {
-    const body = await res.json().catch(() => null);
-    message.textContent = body?.error?.message ?? 'Something went wrong.';
+
+  setBusy($('submit'), true);
+  try {
+    await api('/auth/password-reset/confirm', { method: 'POST', body: { token, newPassword } });
+    show('done-view');
+  } catch (err) {
+    if (err.code === 'INVALID_RESET_TOKEN') show('error-view');
+    else if (!(err.code === 'VALIDATION_ERROR' && applyValidationErrors(err, { newPassword: $('password') })))
+      showAlert($('alert'), 'error', describeError(err));
+  } finally {
+    setBusy($('submit'), false);
   }
 });

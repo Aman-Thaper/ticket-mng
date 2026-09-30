@@ -14,6 +14,7 @@ Short notes on the decisions that shaped this system: the problem, what was chos
 | [0008](0008-caching.md)                  | Two caches: a 1-second micro-cache and generation-keyed Redis               |
 | [0009](0009-overload.md)                 | Under overload, fail fast and shed load; never queue                        |
 | [0010](0010-deployment.md)               | One VPS with Docker Compose, and a rollout script for zero-downtime deploys |
+| [0011](0011-email-verification.md)       | Booking requires a confirmed email address, since tickets are emailed       |
 
 Template:
 

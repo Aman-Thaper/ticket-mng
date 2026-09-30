@@ -81,6 +81,7 @@ async function setup() {
         email: `${tag}-${i}@example.com`,
         name: `Buyer ${i}`,
         role: 'attendee' as const,
+        emailVerifiedAt: new Date(), // booking requires a confirmed address
       })),
     )
     .returning(['id', 'role'])

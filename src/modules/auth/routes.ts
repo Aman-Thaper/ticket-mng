@@ -21,6 +21,7 @@ import {
   type SessionMeta,
 } from './sessions.js';
 import { hashToken } from './tokens.js';
+import { verifyEmailToken } from './verification.js';
 
 // ---------------------------------------------------------------------------------------
 // Refresh token transport: an httpOnly cookie. JavaScript can't read it, so an XSS bug
@@ -75,6 +76,8 @@ const LIMITS = {
   resetIp: { name: 'reset:ip', capacity: 10, refillPerSec: 10 / 3600 },
   resetEmail: { name: 'reset:email', capacity: 3, refillPerSec: 3 / 3600 },
   passwordChange: { name: 'password-change:user', capacity: 5, refillPerSec: 5 / 900 },
+  verifyIp: { name: 'verify:ip', capacity: 30, refillPerSec: 30 / 3600 },
+  verifyResend: { name: 'verify-resend:user', capacity: 3, refillPerSec: 3 / 3600 },
 } satisfies Record<string, RateLimitRule>;
 
 const AuthResponse = z
@@ -103,7 +106,9 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
       schema: {
         tags: ['auth'],
         summary: 'Create an account and log in',
-        description: 'Sets the refresh token as an httpOnly cookie and returns a short-lived access token.',
+        description:
+          'Sets the refresh token as an httpOnly cookie and returns a short-lived access token. ' +
+          'Also emails a confirmation link: booking requires a confirmed address, since tickets are sent to it.',
         body: z.object({
           email: z.email().max(254),
           password: Password,
@@ -127,6 +132,8 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
           .returningAll()
           .executeTakeFirst();
         if (!user) return null;
+        // In the same transaction as the account: no account without its confirmation email.
+        await enqueue(trx, 'email', 'verify-email', { userId: user.id });
         return { user, tokens: await startSession(trx, user, meta(req)) };
       });
       if (!result) throw conflict('EMAIL_TAKEN', 'An account with this email already exists');
@@ -199,7 +206,7 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
 
       const user = await db
         .selectFrom('users')
-        .select(['id', 'email', 'name', 'role', 'createdAt'])
+        .select(['id', 'email', 'name', 'role', 'emailVerifiedAt', 'createdAt'])
         .where('id', '=', rotated.userId)
         .executeTakeFirstOrThrow();
       setRefreshCookie(reply, rotated.tokens);
@@ -417,6 +424,62 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
         throw new AppError(400, 'INVALID_RESET_TOKEN', 'This reset link is invalid, used or expired');
       await denylistSessions(revoked);
       return reply.status(204).send(null);
+    },
+  );
+
+  app.post(
+    '/auth/verify-email',
+    {
+      schema: {
+        tags: ['auth'],
+        summary: 'Confirm an email address with the token from the confirmation link',
+        description:
+          'No login needed: the link may be opened on another device. Opening it again answers already_verified.',
+        body: z.object({ token: z.string().min(1).max(200) }),
+        response: {
+          200: z.object({ status: z.enum(['verified', 'already_verified']) }),
+          ...errors,
+          ...limited,
+        },
+      },
+    },
+    async (req, reply) => {
+      await enforce(req, reply, [[LIMITS.verifyIp, req.ip]]);
+      const status = await verifyEmailToken(req.body.token);
+      if (status === 'invalid') {
+        throw new AppError(
+          400,
+          'INVALID_VERIFICATION_TOKEN',
+          'This confirmation link is invalid or has expired. Log in to get a new one.',
+        );
+      }
+      return { status };
+    },
+  );
+
+  app.post(
+    '/auth/verify-email/resend',
+    {
+      onRequest: requireAuth,
+      schema: {
+        tags: ['auth'],
+        summary: 'Send a new confirmation link to your email address',
+        security: bearerAuth,
+        response: { 202: z.object({ message: z.string() }), ...errors, ...limited },
+      },
+    },
+    async (req, reply) => {
+      const user = currentUser(req);
+      const row = await db
+        .selectFrom('users')
+        .select(['email', 'emailVerifiedAt'])
+        .where('id', '=', user.id)
+        .executeTakeFirstOrThrow();
+      if (row.emailVerifiedAt)
+        throw conflict('EMAIL_ALREADY_VERIFIED', 'Your email address is already confirmed');
+      await enforce(req, reply, [[LIMITS.verifyResend, user.id]]);
+      await enqueue(db, 'email', 'verify-email', { userId: user.id });
+      return reply.status(202).send({ message: `A new confirmation link is on its way to ${row.email}.` });
     },
   );
 };

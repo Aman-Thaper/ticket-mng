@@ -27,6 +27,9 @@ export const unauthorized = (code = 'UNAUTHENTICATED', message = 'Authentication
 export const forbidden = (message = 'You do not have permission to perform this action') =>
   new AppError(403, 'FORBIDDEN', message);
 
+/** 403 with a specific code, for refusals the client can act on (e.g. "confirm your email first"). */
+export const forbiddenBecause = (code: string, message: string) => new AppError(403, code, message);
+
 export const conflict = (code: string, message: string, details?: unknown) =>
   new AppError(409, code, message, details);
 

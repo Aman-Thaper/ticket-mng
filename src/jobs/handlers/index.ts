@@ -1,7 +1,13 @@
 import type { JobData, JobName, QueueName } from '../queues.js';
 import type { JobHandler } from '../runner.js';
 import { expireBookingJob, sweepExpiredHolds } from './bookings.js';
-import { bookingConfirmed, eventReminder, passwordReset, refundProcessed } from './email.js';
+import {
+  bookingConfirmed,
+  emailVerification,
+  eventReminder,
+  passwordReset,
+  refundProcessed,
+} from './email.js';
 import { cleanup, sendEventReminders } from './maintenance.js';
 import { processPoster } from './media.js';
 import { processWebhook, refund, refundEvent } from './payments.js';
@@ -12,6 +18,7 @@ type Handlers = { [Q in QueueName]: { [N in JobName<Q>]: JobHandler<JobData<Q, N
 export const handlers: Handlers = {
   email: {
     'password-reset': passwordReset,
+    'verify-email': emailVerification,
     'booking-confirmed': bookingConfirmed,
     'event-reminder': eventReminder,
     'refund-processed': refundProcessed,

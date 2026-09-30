@@ -4,18 +4,29 @@
 //   1. open a WebSocket to /api/v1/events/:id/live and wait for "hello"
 //   2. load the seat-map snapshot, then apply live updates by seat version
 //   3. select seats → hold them (with an Idempotency-Key) → countdown
+//      (visitors log in first; booking needs a confirmed email, since tickets are emailed)
 //   4. pay with a test card at the fake gateway → the webhook confirms the booking
 //   5. show the QR tickets
 
+import {
+  api,
+  describeError,
+  logout,
+  onSessionChange,
+  reloadUser,
+  restoreSession,
+  session,
+  withNext,
+} from './session.js';
+
 const $ = (id) => document.getElementById(id);
+const PENDING_SELECTION = 'ticket-mng:pending-selection';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const CELL = 18; // grid pitch in px
 const SEAT = 14; // seat size in px
 const LABEL_WIDTH = 90;
 
 const state = {
-  token: null,
-  user: null,
   event: null,
   /** seat id → { seat, section, label, status, version, el } */
   seats: new Map(),
@@ -53,37 +64,6 @@ function setLive(text, kind) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// ─── API client, with transparent access-token refresh ─────────────────────────────────
-
-class ApiError extends Error {
-  constructor(status, body) {
-    super(body?.error?.message ?? `HTTP ${status}`);
-    this.status = status;
-    this.code = body?.error?.code;
-    this.details = body?.error?.details;
-  }
-}
-
-async function api(path, { method = 'GET', body, headers = {}, retryAuth = true } = {}) {
-  const res = await fetch(`/api/v1${path}`, {
-    method,
-    credentials: 'same-origin',
-    headers: {
-      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-      ...(state.token ? { authorization: `Bearer ${state.token}` } : {}),
-      ...headers,
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  // Access tokens live 15 minutes; on 401, trade the httpOnly refresh cookie for a new one.
-  if (res.status === 401 && retryAuth && state.token && (await refreshSession())) {
-    return api(path, { method, body, headers, retryAuth: false });
-  }
-  const data = res.status === 204 ? null : await res.json().catch(() => null);
-  if (!res.ok) throw new ApiError(res.status, data);
-  return data;
-}
-
 /** Retry a request after a network error. Safe for holds because the Idempotency-Key is reused. */
 async function withNetworkRetry(request, attempts = 3) {
   for (let i = 1; ; i++) {
@@ -97,49 +77,110 @@ async function withNetworkRetry(request, attempts = 3) {
   }
 }
 
-// ─── session ───────────────────────────────────────────────────────────────────────────
+// ─── account: header, menu, email confirmation ─────────────────────────────────────────
+// The API client and token refresh live in session.js, shared with the account pages.
 
-function setSession(auth) {
-  state.token = auth?.accessToken ?? null;
-  state.user = auth?.user ?? null;
-  $('login-form').hidden = Boolean(state.user);
-  $('session').hidden = !state.user;
-  $('session-name').textContent = state.user ? `${state.user.name} · ${state.user.email}` : '';
+const initials = (name) =>
+  name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((word) => word[0].toUpperCase())
+    .join('') || '?';
+
+function renderAccount(user) {
+  $('guest').hidden = Boolean(user);
+  $('user-menu').hidden = !user;
+  const here = state.event ? `/?event=${state.event.id}` : location.pathname + location.search;
+  $('login-link').href = withNext('/login', here);
+  $('signup-link').href = withNext('/signup', here);
+  if (user) {
+    $('avatar').textContent = initials(user.name);
+    $('menu-name').textContent = user.name.split(/\s+/)[0];
+    $('menu-full-name').textContent = user.name;
+    $('menu-email').textContent = user.email;
+    $('menu-verified').textContent = user.emailVerified ? 'Email confirmed' : 'Email not confirmed yet';
+    $('menu-verified').classList.toggle('pending', !user.emailVerified);
+  } else {
+    closeMenu();
+  }
+  $('verify-banner').hidden = !user || user.emailVerified;
+  if (user && !user.emailVerified) $('banner-email').textContent = user.email;
   updateCheckout();
 }
+onSessionChange(renderAccount);
 
-async function refreshSession() {
-  const res = await fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin' });
-  if (!res.ok) {
-    setSession(null);
-    return false;
-  }
-  setSession(await res.json());
-  return true;
+function openMenu() {
+  $('menu').hidden = false;
+  $('menu-button').setAttribute('aria-expanded', 'true');
+  $('logout').focus();
 }
 
-$('login-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  try {
-    const auth = await api('/auth/login', {
-      method: 'POST',
-      body: { email: $('login-email').value, password: $('login-password').value },
-      retryAuth: false,
-    });
-    setSession(auth);
-    showMessage('');
-    log(`logged in as ${auth.user.email}`);
-  } catch (err) {
-    showMessage(err.message);
+function closeMenu() {
+  $('menu').hidden = true;
+  $('menu-button').setAttribute('aria-expanded', 'false');
+}
+
+$('menu-button').addEventListener('click', () => ($('menu').hidden ? openMenu() : closeMenu()));
+document.addEventListener('click', (e) => {
+  if (!$('user-menu').contains(e.target)) closeMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('menu').hidden) {
+    closeMenu();
+    $('menu-button').focus();
   }
 });
 
 $('logout').addEventListener('click', async () => {
-  await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'same-origin' });
-  setSession(null);
+  await logout();
   clearBooking();
+  showMessage('');
   log('logged out');
 });
+
+$('resend').addEventListener('click', async () => {
+  $('resend').disabled = true;
+  try {
+    const { message } = await api('/auth/verify-email/resend', { method: 'POST' });
+    $('banner-note').textContent = message;
+  } catch (err) {
+    if (err.code === 'EMAIL_ALREADY_VERIFIED') await reloadUser();
+    else $('banner-note').textContent = describeError(err);
+  } finally {
+    $('resend').disabled = false;
+  }
+});
+
+// Confirmed the address in another tab (the link opens a new one)? Notice on return.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && session.user && !session.user.emailVerified) {
+    reloadUser().catch(() => {});
+  }
+});
+
+/** After logging in to book, bring back the seats the visitor had picked. */
+function restorePendingSelection(eventId) {
+  let pending;
+  try {
+    pending = JSON.parse(sessionStorage.getItem(PENDING_SELECTION) ?? 'null');
+    sessionStorage.removeItem(PENDING_SELECTION);
+  } catch {
+    return;
+  }
+  if (!pending || pending.eventId !== eventId || state.booking || !session.user) return;
+  const stillFree = pending.seatIds.filter((id) => state.seats.get(id)?.status === 'available');
+  for (const id of stillFree) state.selected.add(id);
+  repaintAll();
+  updateCheckout();
+  if (stillFree.length === pending.seatIds.length) {
+    showMessage('Your seats are still selected. Hold them to continue.', true);
+  } else if (stillFree.length) {
+    showMessage('Some of your seats were taken meanwhile; the rest are still selected.');
+  } else {
+    showMessage('Sorry, the seats you picked were taken meanwhile. Pick others.');
+  }
+}
 
 // ─── events ────────────────────────────────────────────────────────────────────────────
 
@@ -246,6 +287,7 @@ async function loadSnapshot(eventId, subscribedAt) {
   else mergeSnapshot(map);
   state.snapshotReady = true;
   applyUpdates(state.buffered.splice(0));
+  restorePendingSelection(eventId);
 
   // The snapshot comes from a ~1 s cache. If it predates our subscription, a change made in
   // that gap would be in neither, so fetch once more after the cache has turned over.
@@ -413,15 +455,36 @@ function updateCheckout() {
     list.append(item);
   }
   $('selection-total').textContent = state.selected.size ? `Total ${money(total, state.event.currency)}` : '';
-  $('hold-button').disabled = !state.user || !state.selected.size || Boolean(state.booking);
-  $('hold-button').textContent = state.user
-    ? `Hold ${state.selected.size || ''} seat${state.selected.size === 1 ? '' : 's'}`
-    : 'Log in to book';
+  const user = session.user;
+  const hold = $('hold-button');
+  if (!user) {
+    hold.disabled = !state.selected.size;
+    hold.textContent = 'Log in to book';
+  } else if (!user.emailVerified) {
+    hold.disabled = true;
+    hold.textContent = 'Confirm your email to book';
+  } else {
+    hold.disabled = !state.selected.size || Boolean(state.booking);
+    hold.textContent = `Hold ${state.selected.size || ''} seat${state.selected.size === 1 ? '' : 's'}`;
+  }
 }
 
 // ─── hold → pay → tickets ──────────────────────────────────────────────────────────────
 
 $('hold-button').addEventListener('click', async () => {
+  if (!session.user) {
+    // Keep the selection across the round trip through the login page.
+    try {
+      sessionStorage.setItem(
+        PENDING_SELECTION,
+        JSON.stringify({ eventId: state.event.id, seatIds: [...state.selected] }),
+      );
+    } catch {
+      // storage unavailable (private mode): they'll pick again
+    }
+    location.assign(withNext('/login', `/?event=${state.event.id}`));
+    return;
+  }
   const seatIds = [...state.selected];
   // One key per logical attempt. Retries after a network error resend the SAME key, so the
   // server returns the original booking instead of trying to hold the seats twice.
@@ -440,9 +503,10 @@ $('hold-button').addEventListener('click', async () => {
     log(`held ${seatIds.length} seat(s): booking ${booking.id.slice(0, 8)}…`);
     showMessage('Seats held. Pay before the timer runs out.', true);
   } catch (err) {
-    showMessage(err.message);
+    showMessage(describeError(err));
     if (err.code === 'SEATS_UNAVAILABLE')
       for (const id of err.details?.seatIds ?? []) state.selected.delete(id);
+    if (err.code === 'EMAIL_NOT_VERIFIED') await reloadUser().catch(() => {});
   } finally {
     repaintAll();
     updateCheckout();
@@ -521,7 +585,7 @@ async function waitForOutcome(bookingId) {
     const booking = await api(`/bookings/${bookingId}`);
     showBooking(booking);
     if (booking.status === 'confirmed') {
-      showMessage('Paid! Your tickets are below, and on their way by email.', true);
+      showMessage(`Paid! Your tickets are below, and we've emailed them to ${session.user.email}.`, true);
       log('booking confirmed by webhook');
       await showTickets(bookingId);
       return;
@@ -571,9 +635,7 @@ $('cancel-button').addEventListener('click', async () => {
 // ─── start ─────────────────────────────────────────────────────────────────────────────
 
 (async () => {
-  // Resume a session only if one exists (the httpOnly refresh cookie is invisible to us;
-  // the has_session hint cookie isn't). Avoids a pointless 401 for logged-out visitors.
-  if (document.cookie.split('; ').includes('has_session=1')) await refreshSession().catch(() => {});
-  updateCheckout();
-  await loadEvents().catch((err) => showMessage(err.message));
+  renderAccount(null);
+  await restoreSession();
+  await loadEvents().catch((err) => showMessage(describeError(err)));
 })();

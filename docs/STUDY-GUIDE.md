@@ -64,7 +64,8 @@ Atomicity under concurrency: two transactions can both check "no overlap" before
 3. `src/modules/auth/sessions.ts`: sessions, refresh rotation, reuse detection, the denylist.
 4. `src/modules/auth/routes.ts`: login, refresh, logout, password reset. Notice the cookie attributes.
 5. `src/modules/auth/guard.ts`: how routes require a user or a role.
-6. [ADR 0006](adr/0006-auth-tokens-and-sessions.md).
+6. `src/modules/auth/verification.ts` and `public/session.js`: email confirmation, and how the pages keep a session (access token in memory, refresh cookie, `?next=` redirects).
+7. [ADR 0006](adr/0006-auth-tokens-and-sessions.md), [ADR 0011](adr/0011-email-verification.md).
 
 **Try:** log in, call `POST /auth/refresh` twice with the _same_ old cookie (copy it from the first response). The second use revokes the session. Why is that the right reaction?
 
@@ -78,6 +79,16 @@ A JWT can't be revoked once issued (verification needs no lookup), so its lifeti
 <details><summary>How can a logout take effect immediately if access tokens are stateless?</summary>
 
 The session id is inside the token. Revoking a session also writes its id to a Redis denylist (for the token's remaining lifetime), and the guard checks that denylist. It fails open if Redis is down: availability over a 15-minute revocation delay.
+</details>
+
+<details><summary>Why is the confirmation token created by the worker, not in the signup request?</summary>
+
+The request only records "send this user a confirmation email" in the outbox. If it created the token, the raw secret would sit in the outbox table and in Redis job data until the job ran. Minting it in the worker means it exists only in the email and, hashed, in the database.
+</details>
+
+<details><summary>Why can't a login link's ?next= be used to send visitors to another site?</summary>
+
+`nextPath()` in `public/session.js` only accepts paths starting with a single `/`. `//evil.example` (a protocol-relative URL), `https://…` and `javascript:` are rejected. Without that check, a login page is an open redirect: a phishing link could log you in on the real site, then send you somewhere else.
 </details>
 
 <details><summary>Why is the password reset token in the URL fragment (#token=...)?</summary>

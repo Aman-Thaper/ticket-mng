@@ -44,7 +44,7 @@ What happens to `POST /api/v1/events/:id/bookings`, in order:
 | 3    | `onRequest` hooks                 | Starts the in-flight gauge; opens the request context (`AsyncLocalStorage`) so deeper code can read the request id; enforces the per-IP token bucket (Redis, shared by all replicas). |
 | 4    | `src/modules/auth/guard.ts`       | Verifies the access token (HS256, algorithm pinned), checks the session isn't revoked (Redis denylist), and adds `userId` to the request logger.                                      |
 | 5    | Zod schema on the route           | Validates params and body; a bad request never reaches the handler (400 with per-field details).                                                                                      |
-| 6    | `src/modules/bookings/routes.ts`  | Per-user rate limit on holds, `Idempotency-Key` handling (a retried request replays the stored response).                                                                             |
+| 6    | `src/modules/bookings/routes.ts`  | Per-user rate limit on holds, the confirmed-email check (tickets are emailed), and `Idempotency-Key` handling (a retried request replays the stored response).                        |
 | 7    | `src/modules/bookings/service.ts` | The business logic: see [Holding seats](#holding-seats).                                                                                                                              |
 | 8    | Kysely + `pg` pool                | One pooled connection per transaction. If none frees up within the timeout, the request fails fast with 503 + `Retry-After` instead of piling up.                                     |
 | 9    | Serialization                     | The response schema decides which fields leave the server (a password hash can't leak by accident).                                                                                   |
@@ -107,6 +107,28 @@ stateDiagram-v2
 ```
 
 A late payment whose seats were sold to someone else leaves the booking as it is: the payment is recorded and **refunded automatically**, and the buyer gets an email saying so.
+
+## Accounts and email confirmation
+
+Tickets are emailed to the address the buyer logs in with, so booking requires a confirmed address ([ADR 0011](adr/0011-email-verification.md)):
+
+```mermaid
+sequenceDiagram
+  participant B as Browser
+  participant A as API
+  participant P as Postgres
+  participant W as Worker
+  B->>A: POST /auth/signup
+  A->>P: INSERT user (email_verified_at NULL) + outbox "verify-email", one transaction
+  A-->>B: 201, logged in (access token + refresh cookie)
+  W->>P: new confirmation token (only its hash is stored)
+  W-->>B: email with /verify-email#token=…
+  B->>A: POST /auth/verify-email {token}
+  A->>P: email_verified_at = now()
+  B->>A: POST /events/:id/bookings (before confirming: 403 EMAIL_NOT_VERIFIED)
+```
+
+The pages (`/login`, `/signup`, `/forgot-password`, `/reset-password`, `/verify-email`, and the seat map at `/`) share `public/session.js`: the access token lives in memory only, the httpOnly refresh cookie renews it, and `?next=` brings the visitor back where they were (same-site paths only, so it can't be abused as an open redirect).
 
 ## Holding seats
 

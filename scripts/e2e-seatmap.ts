@@ -1,46 +1,71 @@
 /**
- * End-to-end check of the live seat map in a real (headless) browser.
+ * End-to-end check in a real (headless) browser: an account from signup to tickets in the inbox.
  *
- *   npm run e2e                      # against http://localhost:8080 (scripts/cluster.sh start)
+ *   npm run e2e                      # against http://localhost:8080 (docker compose / cluster)
  *   npm run e2e -- --base-url http://localhost:3000
  *
- * Two browsers open the same fresh event. The "buyer" logs in, picks two seats, holds them,
- * pays with a test card and gets QR tickets. The "watcher" must see those seats turn held,
- * then sold, live over the WebSocket, without reloading. Screenshots go to .dev/e2e-*.png.
- * Needs the API and the worker running (the worker confirms the payment).
+ * The buyer signs up on /signup, opens the confirmation email (read from Mailpit's API) and
+ * follows its link, then picks two seats, holds them, pays with a test card and gets QR
+ * tickets, and the email with those QR codes must arrive at the address they signed up with.
+ * Meanwhile a second browser, the "watcher", must see the seats turn held, then sold, live
+ * over the WebSocket, without reloading. Screenshots go to .dev/e2e-*.png.
+ * Needs the API, the worker (it sends email and confirms payments) and Mailpit.
  */
 import { parseArgs } from 'node:util';
 import { chromium, type Page } from 'playwright';
 import { sql } from 'kysely';
 import { db } from '../src/db/index.js';
 import { redis } from '../src/lib/redis.js';
-import { hashPassword } from '../src/modules/auth/passwords.js';
 import { generateSeats } from '../src/modules/venues/layout.js';
 
 const { values } = parseArgs({
-  options: { 'base-url': { type: 'string', default: 'http://localhost:8080' } },
+  options: {
+    'base-url': { type: 'string', default: 'http://localhost:8080' },
+    'mailpit-url': { type: 'string', default: 'http://localhost:8025' },
+  },
 });
 const BASE = values['base-url'];
+const MAILPIT = values['mailpit-url'];
+
+interface MailSummary {
+  ID: string;
+  Subject: string;
+}
+interface MailDetail {
+  Subject: string;
+  Text: string;
+  HTML: string;
+  Inline: { ContentType: string; ContentID: string }[];
+}
+
+/** Wait for an email to `to` whose subject starts with `subject`, via Mailpit's API. */
+async function waitForMail(to: string, subject: string, timeoutMs = 20_000): Promise<MailDetail> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await fetch(`${MAILPIT}/api/v1/search?query=${encodeURIComponent(`to:"${to}"`)}`);
+    const { messages } = (await res.json()) as { messages: MailSummary[] | null };
+    const hit = messages?.find((m) => m.Subject.startsWith(subject));
+    if (hit) return (await (await fetch(`${MAILPIT}/api/v1/message/${hit.ID}`)).json()) as MailDetail;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`no "${subject}" email for ${to} within ${timeoutMs / 1000} s`);
+}
 
 // ─── a fresh, small event ────────────────────────────────────────────────────────────────
 const tag = `e2e-${Date.now()}`;
 const organizer = await db
   .insertInto('users')
-  .values({ email: `${tag}@example.com`, name: 'E2E Organizer', role: 'organizer' })
+  .values({
+    email: `${tag}@example.com`,
+    name: 'E2E Organizer',
+    role: 'organizer',
+    emailVerifiedAt: new Date(),
+  })
   .returning('id')
   .executeTakeFirstOrThrow();
-// Our own buyer with a known password, so the test works on an empty database too.
+// The buyer signs up through the UI, so the account pages are part of the test.
 const buyerEmail = `${tag}-buyer@example.com`;
 const buyerPassword = 'e2e password 123';
-await db
-  .insertInto('users')
-  .values({
-    email: buyerEmail,
-    name: 'E2E Buyer',
-    role: 'attendee',
-    passwordHash: await hashPassword(buyerPassword),
-  })
-  .execute();
 const sections = [
   { name: 'Stalls', rows: 6, seatsPerRow: 14 },
   { name: 'Circle', rows: 4, seatsPerRow: 10 },
@@ -91,28 +116,53 @@ await sql`
 // ─── two browsers ────────────────────────────────────────────────────────────────────────
 const browser = await chromium.launch();
 const consoleErrors: string[] = [];
-const open = async (name: string) => {
+const newPage = async (name: string) => {
   const page = await (await browser.newContext({ viewport: { width: 1280, height: 900 } })).newPage();
   page.on('console', (m) => m.type() === 'error' && consoleErrors.push(`${name}: ${m.text()}`));
   page.on('pageerror', (e) => consoleErrors.push(`${name}: ${e.message}`));
+  return page;
+};
+const openMap = async (page: Page) => {
   await page.goto(`${BASE}/?event=${event.id}`);
   await page.locator('#live-status', { hasText: 'live' }).waitFor({ timeout: 10_000 });
   await page.locator('rect.seat').first().waitFor();
-  return page;
 };
 const seatClass = (page: Page, id: string) => page.locator(`rect[data-id="${id}"]`).getAttribute('class');
 const step = (message: string) => console.log(`✓ ${message}`);
 
 try {
-  const watcher = await open('watcher');
-  const buyer = await open('buyer');
-  step(`both pages loaded the seat map (${await buyer.locator('rect.seat').count()} seats) and went live`);
+  const watcher = await newPage('watcher');
+  await openMap(watcher);
+  const buyer = await newPage('buyer');
 
-  await buyer.locator('#login-email').fill(buyerEmail);
-  await buyer.locator('#login-password').fill(buyerPassword);
-  await buyer.locator('#login-form button[type=submit]').click();
-  await buyer.locator('#session-name').filter({ hasText: '@' }).waitFor();
-  step(`buyer logged in as ${await buyer.locator('#session-name').textContent()}`);
+  // ── sign up ──
+  await buyer.goto(`${BASE}/signup?next=${encodeURIComponent(`/?event=${event.id}`)}`);
+  await buyer.locator('#name').fill('E2E Buyer');
+  await buyer.locator('#email').fill(buyerEmail);
+  await buyer.locator('#password').fill(buyerPassword);
+  await buyer.locator('#submit').click();
+  await buyer.locator('#done-view h1', { hasText: 'Check your inbox' }).waitFor();
+  step(`signed up as ${buyerEmail}; the page asks to confirm the email`);
+
+  // Unconfirmed: can browse, can't book.
+  await openMap(buyer);
+  await buyer.locator('#verify-banner').waitFor();
+  await buyer.locator('#hold-button', { hasText: 'Confirm your email' }).waitFor();
+  step('before confirming: the seat map shows the confirmation banner and booking is disabled');
+
+  // ── confirm the email address ──
+  const confirmation = await waitForMail(buyerEmail, 'Confirm your email address');
+  const link = /(https?:\/\/\S+\/verify-email#token=[\w-]+)/.exec(confirmation.Text)?.[1];
+  if (!link) throw new Error(`no confirmation link in:\n${confirmation.Text}`);
+  await buyer.goto(link);
+  await buyer.locator('#done-view h1', { hasText: 'Email confirmed' }).waitFor();
+  step('confirmation email arrived; its link confirmed the address');
+
+  await openMap(buyer);
+  await buyer.locator('#avatar', { hasText: 'EB' }).waitFor();
+  if (await buyer.locator('#verify-banner').isVisible())
+    throw new Error('banner still shown after confirming');
+  step(`both pages loaded the seat map (${await buyer.locator('rect.seat').count()} seats) and went live`);
 
   const picks = buyer.locator('rect.seat.available');
   const ids = [
@@ -140,6 +190,15 @@ try {
   await buyer.locator('#pay-button').click();
   await buyer.locator('.ticket img').nth(1).waitFor({ timeout: 20_000 });
   step(`payment confirmed; ${await buyer.locator('.ticket img').count()} QR tickets shown`);
+  await buyer.locator('#message', { hasText: buyerEmail }).waitFor();
+
+  // ── the tickets, by email, to the address the buyer signed up with ──
+  const ticketsMail = await waitForMail(buyerEmail, 'Your tickets:');
+  const qrCodes = ticketsMail.Inline.filter((part) => part.ContentType === 'image/png');
+  if (qrCodes.length !== 2) throw new Error(`expected 2 QR codes in the email, got ${qrCodes.length}`);
+  if (!qrCodes.every((qr) => ticketsMail.HTML.includes(`cid:${qr.ContentID}`)))
+    throw new Error('QR images are not embedded in the email body');
+  step(`"${ticketsMail.Subject}" arrived at ${buyerEmail} with ${qrCodes.length} QR codes embedded`);
   await buyer.screenshot({ path: '.dev/e2e-buyer-tickets.png', fullPage: true });
 
   await watcher.waitForFunction(

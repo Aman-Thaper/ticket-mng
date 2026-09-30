@@ -3,10 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Choose a new password · Ticket MNG</title>
-    <meta name="description" content="Choose a new password for your Ticket MNG account." />
+    <title>Create your account · Ticket MNG</title>
+    <meta
+      name="description"
+      content="Create a Ticket MNG account to book seats and receive your tickets by email."
+    />
     <link rel="stylesheet" href="/auth.css" />
-    <script type="module" src="/reset-password.js"></script>
+    <script type="module" src="/signup.js"></script>
   </head>
   <body>
     <div class="auth-shell">
@@ -109,14 +112,36 @@
             >Ticket MNG</a
           >
           <section id="form-view">
-            <h1>Choose a new password</h1>
-            <p class="sub">
-              After this, you'll be logged out everywhere and can log in with the new password.
-            </p>
+            <h1>Create your account</h1>
+            <p class="sub">Book seats in seconds. Your tickets arrive by email.</p>
             <div id="alert" class="alert" role="alert" hidden></div>
             <form id="form" novalidate>
               <div class="field">
-                <label for="password">New password</label>
+                <label for="name">Full name</label>
+                <input id="name" name="name" type="text" autocomplete="name" maxlength="100" required />
+                <p class="field-error"></p>
+              </div>
+              <div class="field">
+                <label for="email">Email</label>
+                <input
+                  id="email"
+                  name="email"
+                  type="email"
+                  autocomplete="email"
+                  inputmode="email"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  maxlength="254"
+                  required
+                  aria-describedby="email-hint"
+                />
+                <p class="hint" id="email-hint">
+                  Your tickets and receipts are sent here, so we'll ask you to confirm it.
+                </p>
+                <p class="field-error"></p>
+              </div>
+              <div class="field">
+                <label for="password">Password</label>
                 <div class="password-wrap">
                   <input
                     id="password"
@@ -149,11 +174,15 @@
                 Use 8 or more characters. A short phrase is easy to remember and hard to guess.
               </p>
               <button class="btn" id="submit" type="submit">
-                <span class="btn-label">Save new password</span>
+                <span class="btn-label">Create account</span>
               </button>
+              <p class="legal">
+                By creating an account, you agree to receive booking emails at this address.
+              </p>
             </form>
+            <p class="switch">Already have an account? <a id="login-link" href="/login">Log in</a></p>
           </section>
-          <section id="done-view" class="state success" hidden>
+          <section id="done-view" class="state" hidden>
             <div class="icon">
               <svg
                 width="30"
@@ -161,43 +190,26 @@
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
-                stroke-width="2.4"
+                stroke-width="2"
                 stroke-linecap="round"
                 stroke-linejoin="round"
                 aria-hidden="true"
               >
-                <path d="M20 6 9 17l-5-5" />
+                <rect x="3" y="5" width="18" height="14" rx="2" />
+                <path d="m3 7 9 6 9-6" />
               </svg>
             </div>
-            <h1>Password updated</h1>
-            <p>Your password was changed and every session was logged out. Log in with your new password.</p>
-            <div class="actions">
-              <a class="btn" href="/login?reset=1"><span class="btn-label">Log in</span></a>
-            </div>
-          </section>
-          <section id="error-view" class="state error" hidden>
-            <div class="icon">
-              <svg
-                width="30"
-                height="30"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2.4"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M12 8v5M12 16.5v.5" />
-                <circle cx="12" cy="12" r="9" />
-              </svg>
-            </div>
-            <h1>This link has expired</h1>
-            <p id="error-text">
-              Reset links work once, for 30 minutes. Request a new one and use the latest email.
+            <h1>Check your inbox</h1>
+            <p>
+              We sent a confirmation link to <strong id="done-email"></strong>. Confirm your email address to
+              start booking: your tickets will be sent there.
             </p>
+            <div id="done-alert" class="alert" role="status" hidden></div>
             <div class="actions">
-              <a class="btn" href="/forgot-password"><span class="btn-label">Request a new link</span></a>
+              <a class="btn" id="continue" href="/"><span class="btn-label">Browse events</span></a>
+              <button class="btn btn-secondary" id="resend" type="button">
+                <span class="btn-label">Resend the email</span>
+              </button>
             </div>
           </section>
         </div>

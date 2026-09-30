@@ -4,7 +4,7 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { config } from '../../src/config.js';
 import { db } from '../../src/db/index.js';
 import { sentMail } from '../../src/lib/mailer.js';
-import { runQueuedJobs, useApp } from '../helpers.js';
+import { createEvent, createUser, createVenue, publish, runQueuedJobs, useApp } from '../helpers.js';
 
 const PASSWORD = 'correct horse battery';
 
@@ -24,6 +24,10 @@ async function signup(app: FastifyInstance, email = 'ada@example.com', role = 'a
 
 const me = (app: FastifyInstance, token: string) =>
   app.inject({ url: '/api/v1/users/me', headers: { authorization: `Bearer ${token}` } });
+
+/** Signup also sends a confirmation email, so tests pick messages by subject. */
+const mailsAbout = (subject: string) => sentMail.filter((m) => m.subject === subject);
+const tokenIn = (text: string) => /#token=([\w-]+)/.exec(text)![1]!;
 
 const refresh = (app: FastifyInstance, cookie: string) =>
   app.inject({ method: 'POST', url: '/api/v1/auth/refresh', cookies: { refresh_token: cookie } });
@@ -311,9 +315,10 @@ describe('auth', () => {
       expect(res.statusCode).toBe(202);
 
       await runQueuedJobs();
-      expect(sentMail).toHaveLength(1);
-      const token = /#token=([\w-]+)/.exec(sentMail[0]!.text)![1]!;
-      expect(sentMail[0]!.to).toBe('ada@example.com');
+      const resets = mailsAbout('Reset your password');
+      expect(resets).toHaveLength(1);
+      const token = tokenIn(resets[0]!.text);
+      expect(resets[0]!.to).toBe('ada@example.com');
 
       const confirm = (newPassword: string) =>
         t.app.inject({
@@ -352,8 +357,9 @@ describe('auth', () => {
         payload: { email: 'ada@example.com' },
       });
       await runQueuedJobs();
-      expect(sentMail).toHaveLength(1);
-      const token = /#token=([\w-]+)/.exec(sentMail[0]!.text)![1]!;
+      const resets = mailsAbout('Reset your password');
+      expect(resets).toHaveLength(1);
+      const token = tokenIn(resets[0]!.text);
       await db
         .updateTable('passwordResetTokens')
         .set({ expiresAt: new Date(Date.now() - 1000) })
@@ -365,6 +371,104 @@ describe('auth', () => {
         payload: { token, newPassword: 'my new password' },
       });
       expect(res.json().error.code).toBe('INVALID_RESET_TOKEN');
+    });
+  });
+
+  describe('email verification', () => {
+    const verify = (token: string) =>
+      t.app.inject({ method: 'POST', url: '/api/v1/auth/verify-email', payload: { token } });
+    const resend = (accessToken: string) =>
+      t.app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/verify-email/resend',
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+
+    it('emails a confirmation link at signup; the link confirms the address, and works twice', async () => {
+      const { body } = await signup(t.app);
+      expect(body.user.emailVerified).toBe(false);
+
+      await runQueuedJobs();
+      const mails = mailsAbout('Confirm your email address');
+      expect(mails).toHaveLength(1);
+      expect(mails[0]!.to).toBe('ada@example.com');
+      expect(mails[0]!.text).toContain(`${config.APP_URL}/verify-email#token=`);
+      const token = tokenIn(mails[0]!.text);
+
+      // Only a hash is stored, never the token itself.
+      const stored = await db.selectFrom('emailVerificationTokens').select('tokenHash').execute();
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.tokenHash.toString('base64url')).not.toBe(token);
+
+      expect((await verify(token)).json()).toEqual({ status: 'verified' });
+      expect((await me(t.app, body.accessToken)).json().emailVerified).toBe(true);
+      // Clicking the link again (or on a second device) is not an error.
+      expect((await verify(token)).json()).toEqual({ status: 'already_verified' });
+    });
+
+    it('rejects unknown and expired links', async () => {
+      await signup(t.app);
+      await runQueuedJobs();
+      const token = tokenIn(mailsAbout('Confirm your email address')[0]!.text);
+
+      const unknown = await verify('not-a-real-token');
+      expect(unknown.statusCode).toBe(400);
+      expect(unknown.json().error.code).toBe('INVALID_VERIFICATION_TOKEN');
+
+      await db
+        .updateTable('emailVerificationTokens')
+        .set({ expiresAt: new Date(Date.now() - 1000) })
+        .execute();
+      expect((await verify(token)).json().error.code).toBe('INVALID_VERIFICATION_TOKEN');
+    });
+
+    it('resends the link on request, rate-limited, and refuses once confirmed', async () => {
+      const { body } = await signup(t.app);
+      await runQueuedJobs();
+
+      const res = await resend(body.accessToken);
+      expect(res.statusCode).toBe(202);
+      await runQueuedJobs();
+      const mails = mailsAbout('Confirm your email address');
+      expect(mails).toHaveLength(2);
+      // The first email still works: a resend doesn't invalidate the link already sent.
+      expect((await verify(tokenIn(mails[0]!.text))).json()).toEqual({ status: 'verified' });
+
+      const again = await resend(body.accessToken);
+      expect(again.statusCode).toBe(409);
+      expect(again.json().error.code).toBe('EMAIL_ALREADY_VERIFIED');
+    });
+
+    it('limits resends to 3 an hour', async () => {
+      const { body } = await signup(t.app);
+      for (let i = 0; i < 3; i++) expect((await resend(body.accessToken)).statusCode).toBe(202);
+      expect((await resend(body.accessToken)).statusCode).toBe(429);
+    });
+
+    it('lets unconfirmed accounts log in and browse, but not book', async () => {
+      const organizer = await createUser('organizer');
+      const venueId = (await createVenue(t.app, organizer)).id;
+      const eventId = (await createEvent(t.app, organizer, venueId)).json().id;
+      await publish(t.app, organizer, eventId);
+      const map = (await t.app.inject({ url: `/api/v1/events/${eventId}/seats` })).json();
+      const seatId = map.sections[0].seats[0].id;
+
+      const buyer = await createUser('attendee', { verified: false });
+      const hold = () =>
+        t.app.inject({
+          method: 'POST',
+          url: `/api/v1/events/${eventId}/bookings`,
+          headers: buyer.auth,
+          payload: { seatIds: [seatId] },
+        });
+
+      const refused = await hold();
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json().error.code).toBe('EMAIL_NOT_VERIFIED');
+      expect((await me(t.app, buyer.token)).statusCode).toBe(200);
+
+      await db.updateTable('users').set({ emailVerifiedAt: new Date() }).where('id', '=', buyer.id).execute();
+      expect((await hold()).statusCode).toBe(201);
     });
   });
 });

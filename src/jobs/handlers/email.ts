@@ -3,6 +3,7 @@ import { config } from '../../config.js';
 import { db } from '../../db/index.js';
 import {
   bookingConfirmedEmail,
+  emailVerificationEmail,
   eventReminderEmail,
   passwordResetEmail,
   refundProcessedEmail,
@@ -10,6 +11,7 @@ import {
 } from '../../emails/templates.js';
 import { sendMail } from '../../lib/mailer.js';
 import { hashToken, newOpaqueToken } from '../../modules/auth/tokens.js';
+import { issueVerificationToken } from '../../modules/auth/verification.js';
 import { qrPng, ticketsForBooking } from '../../modules/tickets/service.js';
 import type { JobHandler } from '../runner.js';
 import type { Jobs } from '../queues.js';
@@ -133,8 +135,35 @@ export const passwordReset: JobHandler<Jobs['email']['password-reset']> = async 
   await sendMail(
     passwordResetEmail(
       user,
-      `${config.APP_URL}/reset-password.html#token=${token}`,
+      `${config.APP_URL}/reset-password#token=${token}`,
       config.PASSWORD_RESET_TTL_MINUTES,
+    ),
+  );
+  return { sent: true };
+};
+
+/**
+ * Sent after signup and on "resend". The token is minted here rather than in the request,
+ * so the raw token never sits in the outbox or in Redis. A retry after a failed send mints
+ * another one; that's fine, since any unexpired confirmation token works.
+ */
+export const emailVerification: JobHandler<Jobs['email']['verify-email']> = async (job, log) => {
+  const user = await db
+    .selectFrom('users')
+    .select(['id', 'email', 'name', 'emailVerifiedAt'])
+    .where('id', '=', job.data.userId)
+    .executeTakeFirst();
+  if (!user || user.emailVerifiedAt) {
+    log.info('account gone or already confirmed; nothing sent');
+    return { sent: false };
+  }
+  const token = await issueVerificationToken(db, user.id);
+  // Like reset links, the token travels in the URL fragment, which browsers never send to servers.
+  await sendMail(
+    emailVerificationEmail(
+      user,
+      `${config.APP_URL}/verify-email#token=${token}`,
+      config.EMAIL_VERIFICATION_TTL_HOURS,
     ),
   );
   return { sent: true };

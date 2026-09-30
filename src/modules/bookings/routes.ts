@@ -4,6 +4,7 @@ import { BOOKING_STATUSES } from '../../db/types.js';
 import { withIdempotency } from '../../lib/idempotency.js';
 import { decodeCursor, encodeCursor } from '../../lib/pagination.js';
 import { enforce } from '../../lib/rate-limit.js';
+import { assertEmailVerified } from '../auth/verification.js';
 import { ErrorResponse, errors, IdParams, Limit } from '../../lib/schemas.js';
 import { bearerAuth, currentUser, requireAuth } from '../auth/guard.js';
 import { assertBookingOwner, BookingDto, getBookingFor, listBookingsFor } from './queries.js';
@@ -47,6 +48,8 @@ export const bookingRoutes: FastifyPluginAsyncZod = async (app) => {
     async (req, reply) => {
       const user = currentUser(req);
       await enforce(req, reply, [[HOLD_LIMIT, user.id]]);
+      // Tickets are emailed, so the address must be confirmed before anything is booked.
+      await assertEmailVerified(user.id);
 
       return withIdempotency(req, reply, user.id, async () => {
         const { bookingId } = await holdSeats(

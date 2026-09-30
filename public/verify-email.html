@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Choose a new password · Ticket MNG</title>
-    <meta name="description" content="Choose a new password for your Ticket MNG account." />
+    <title>Confirm your email · Ticket MNG</title>
+    <meta name="description" content="Confirm the email address of your Ticket MNG account." />
     <link rel="stylesheet" href="/auth.css" />
-    <script type="module" src="/reset-password.js"></script>
+    <script type="module" src="/verify-email.js"></script>
   </head>
   <body>
     <div class="auth-shell">
@@ -108,50 +108,10 @@
                 <path d="M13 5v2M13 11v2M13 17v2" /></svg></span
             >Ticket MNG</a
           >
-          <section id="form-view">
-            <h1>Choose a new password</h1>
-            <p class="sub">
-              After this, you'll be logged out everywhere and can log in with the new password.
-            </p>
-            <div id="alert" class="alert" role="alert" hidden></div>
-            <form id="form" novalidate>
-              <div class="field">
-                <label for="password">New password</label>
-                <div class="password-wrap">
-                  <input
-                    id="password"
-                    name="password"
-                    type="password"
-                    autocomplete="new-password"
-                    maxlength="128"
-                    required
-                  />
-                  <button
-                    class="toggle"
-                    id="toggle-password"
-                    type="button"
-                    aria-label="Show password"
-                    aria-pressed="false"
-                  >
-                    <span class="label">Show</span>
-                  </button>
-                </div>
-                <p class="field-error"></p>
-              </div>
-              <div class="strength" id="strength" data-score="0" aria-hidden="true">
-                <div class="bars">
-                  <span class="bar"></span><span class="bar"></span><span class="bar"></span
-                  ><span class="bar"></span>
-                </div>
-                <span class="strength-label"></span>
-              </div>
-              <p class="hint">
-                Use 8 or more characters. A short phrase is easy to remember and hard to guess.
-              </p>
-              <button class="btn" id="submit" type="submit">
-                <span class="btn-label">Save new password</span>
-              </button>
-            </form>
+          <section id="loading-view" class="state" aria-live="polite">
+            <div class="icon"><span class="spinner" aria-hidden="true"></span></div>
+            <h1>Confirming your email…</h1>
+            <p>This only takes a moment.</p>
           </section>
           <section id="done-view" class="state success" hidden>
             <div class="icon">
@@ -169,10 +129,10 @@
                 <path d="M20 6 9 17l-5-5" />
               </svg>
             </div>
-            <h1>Password updated</h1>
-            <p>Your password was changed and every session was logged out. Log in with your new password.</p>
+            <h1>Email confirmed</h1>
+            <p id="done-text">You're all set. Your tickets will be sent to your email address.</p>
             <div class="actions">
-              <a class="btn" href="/login?reset=1"><span class="btn-label">Log in</span></a>
+              <a class="btn" id="continue" href="/"><span class="btn-label">Browse events</span></a>
             </div>
           </section>
           <section id="error-view" class="state error" hidden>
@@ -193,11 +153,15 @@
               </svg>
             </div>
             <h1>This link has expired</h1>
-            <p id="error-text">
-              Reset links work once, for 30 minutes. Request a new one and use the latest email.
-            </p>
+            <p>Confirmation links work for 48 hours. We can send you a new one.</p>
+            <div id="error-alert" class="alert" role="status" hidden></div>
             <div class="actions">
-              <a class="btn" href="/forgot-password"><span class="btn-label">Request a new link</span></a>
+              <button class="btn" id="resend" type="button" hidden>
+                <span class="btn-label">Send a new link</span>
+              </button>
+              <a class="btn" id="login-to-resend" href="/login"
+                ><span class="btn-label">Log in to get a new link</span></a
+              >
             </div>
           </section>
         </div>
