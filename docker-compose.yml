@@ -33,7 +33,13 @@ x-app: &app
     S3_PUBLIC_URL: http://localhost:9000
     S3_ACCESS_KEY: minioadmin
     S3_SECRET_KEY: minioadmin
+    # Email goes to Mailpit (inbox at http://localhost:8025). To send real email through Resend:
+    #   MAIL_TRANSPORT=resend RESEND_API_KEY=re_... MAIL_FROM='You <you@your-verified-domain>' docker compose up -d
     SMTP_URL: smtp://mailpit:1025
+    MAIL_TRANSPORT: ${MAIL_TRANSPORT:-smtp}
+    RESEND_API_KEY: ${RESEND_API_KEY:-}
+    MAIL_FROM: ${MAIL_FROM:-Ticket MNG <no-reply@ticket-mng.local>}
+    MAIL_REPLY_TO: ${MAIL_REPLY_TO:-}
     PAYMENT_PROVIDER: fake
     # The fake gateway delivers webhooks through the load balancer, like a real provider.
     FAKE_GATEWAY_WEBHOOK_URL: http://nginx/api/v1/webhooks/fake

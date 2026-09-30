@@ -9,6 +9,9 @@ try {
 
 /** z.coerce.boolean() treats "false" as true (non-empty string), so parse explicitly. */
 const bool = z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' || v === '1');
+/** Unset and empty are the same (compose passes `${VAR:-}` through as an empty string). */
+const optional = <T extends z.ZodType>(schema: T) =>
+  z.preprocess((v) => (v === '' ? undefined : v), schema.optional());
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -140,10 +143,22 @@ const schema = z.object({
   QUEUE_PREFIX: z.string().default('bull'),
 
   // ---- email
+  /**
+   * How email leaves the system:
+   *   smtp   → SMTP_URL (Mailpit locally, or any SMTP provider)
+   *   resend → Resend's HTTP API (RESEND_API_KEY): idempotent sends and precise errors
+   *   memory → kept in-process, for tests
+   */
+  MAIL_TRANSPORT: z.enum(['smtp', 'resend', 'memory']).default('smtp'),
   SMTP_URL: z.string().default('smtp://localhost:1025'),
+  /** With Resend, an address on a domain verified at resend.com/domains. */
   MAIL_FROM: z.string().default('Ticket MNG <no-reply@ticket-mng.local>'),
-  /** memory: keep sent mail in-process (tests); smtp: deliver via SMTP_URL. */
-  MAIL_TRANSPORT: z.enum(['smtp', 'memory']).default('smtp'),
+  /** Where customers' replies go, e.g. a support inbox. */
+  MAIL_REPLY_TO: optional(z.email()),
+  RESEND_API_KEY: optional(z.string().startsWith('re_')),
+  RESEND_API_URL: z.url().default('https://api.resend.com'),
+  /** Emails per second across all workers. Unset: 2 with Resend (its default API limit), else unlimited. */
+  MAIL_RATE_PER_SECOND: optional(z.coerce.number().int().positive()),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -175,6 +190,15 @@ if (
 }
 if (parsed.data.NODE_ENV === 'production' && parsed.data.PAYMENT_PROVIDER === 'fake') {
   console.error('The fake payment gateway accepts any test card; it is not allowed in production');
+  process.exit(1);
+}
+
+if (parsed.data.MAIL_TRANSPORT === 'resend' && !parsed.data.RESEND_API_KEY) {
+  console.error('MAIL_TRANSPORT=resend needs RESEND_API_KEY (create one at https://resend.com/api-keys)');
+  process.exit(1);
+}
+if (parsed.data.NODE_ENV === 'production' && parsed.data.MAIL_TRANSPORT === 'memory') {
+  console.error('MAIL_TRANSPORT=memory drops every email; it is for tests only');
   process.exit(1);
 }
 

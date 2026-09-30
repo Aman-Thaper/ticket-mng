@@ -24,8 +24,12 @@ import { readiness } from './modules/health/checks.js';
 
 // Concurrency per queue reflects what each kind of job is bound by: email waits on SMTP
 // (I/O, many in parallel), media burns CPU (few), maintenance scans tables (one at a time).
+// Email providers rate-limit their APIs (Resend: 2 requests/s by default). Pacing the queue
+// keeps a sold-out on-sale from turning into a burst of 429s and wasted retries.
+const mailRate = config.MAIL_RATE_PER_SECOND ?? (config.MAIL_TRANSPORT === 'resend' ? 2 : undefined);
+
 const workers = [
-  createWorker('email', handlers.email, 10),
+  createWorker('email', handlers.email, 10, mailRate ? { max: mailRate, duration: 1000 } : undefined),
   createWorker('bookings', handlers.bookings, 20),
   createWorker('payments', handlers.payments, 10),
   createWorker('media', handlers.media, 2),

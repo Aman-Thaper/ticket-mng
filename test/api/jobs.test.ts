@@ -114,6 +114,15 @@ describe('background jobs', () => {
       expect(mail).toMatchObject({ to: buyer.email, subject: 'Your tickets: Test Concert' });
       expect(mail.attachments).toHaveLength(2);
       for (const a of mail.attachments!) expect(mail.html).toContain(`cid:${a.cid}`);
+      // One key per booking: a retried job can't make the provider send the tickets twice.
+      expect(mail.idempotencyKey).toBe(`booking-confirmed/${booking.id}`);
+      const notification = await db
+        .selectFrom('notifications')
+        .select(['status', 'providerMessageId'])
+        .where('kind', '=', 'booking-confirmed')
+        .where('refId', '=', booking.id)
+        .executeTakeFirstOrThrow();
+      expect(notification).toEqual({ status: 'sent', providerMessageId: 'memory-1' });
     });
 
     it("releases an unpaid hold's seats when its delayed expiry job fires", async () => {

@@ -127,12 +127,29 @@ The middle row is why step 2 exists. Nginx re-resolves `api` every 2 s, so for u
 
 ## Email
 
-Confirmation links, password resets and the QR tickets all go out by email, so deliverability is part of the product: a ticket email in spam becomes a problem at the door.
+Confirmation links, password resets and the QR tickets all go out by email, so deliverability is part of the product: a ticket email in spam becomes a problem at the door. Email is sent through [Resend](https://resend.com)'s API ([ADR 0012](adr/0012-resend.md)).
 
-- **Use a transactional provider** (Postmark, Resend, Amazon SES, Mailgun, Brevo, ...) and put its SMTP credentials in `SMTP_URL`, e.g. `smtps://USERNAME:PASSWORD@smtp.postmarkapp.com:465`. URL-encode special characters in the username and password (`@` becomes `%40`).
-- **Send from your own domain:** `MAIL_FROM="Ticket MNG <tickets@yourdomain.com>"`. Add the provider's **SPF** and **DKIM** DNS records, and a **DMARC** record (start with `v=DMARC1; p=none; rua=mailto:you@yourdomain.com`). Without them, Gmail and Outlook file you under spam or reject the mail.
-- **Test with real inboxes** (Gmail and Outlook) before launch: sign up, confirm, buy a ticket, and check that the QR codes show inline.
-- Failed sends are retried with backoff and end up in the dead-letter queue, so an outage at the provider delays emails but doesn't lose them.
+1. **Create a Resend account.** Until you verify a domain you can already test: Resend delivers mail sent from `onboarding@resend.dev`, but only to your own account's address.
+2. **Verify your domain** at resend.com/domains (a subdomain such as `mail.yourdomain.com` keeps it separate from your main domain's mail). Add the **SPF** (TXT and MX) and **DKIM** (TXT) records it shows to your DNS, then add a **DMARC** record: `_dmarc` TXT `v=DMARC1; p=none; rua=mailto:you@yourdomain.com`. Without them, Gmail and Outlook file you under spam or reject the mail.
+3. **Create an API key** with "Sending access" (not "Full access": the app only sends) at resend.com/api-keys.
+4. **Configure `.env.production`:**
+
+   ```bash
+   MAIL_TRANSPORT=resend
+   RESEND_API_KEY=re_...
+   MAIL_FROM="Ticket MNG <tickets@yourdomain.com>"   # on the verified domain
+   MAIL_REPLY_TO=support@yourdomain.com              # replies from customers go here
+   ```
+
+5. **Test with real inboxes** (Gmail and Outlook) before launch: sign up, confirm, buy a ticket, and check that the QR codes show inline. Every email carries a `category` tag (`verify-email`, `booking-confirmed`, ...), so Resend's dashboard can filter by kind; `notifications.provider_message_id` links each ticket email to its entry there.
+
+What the app does for you:
+
+- **No duplicate ticket emails.** Ticket, reminder and refund emails carry an idempotency key (`booking-confirmed/<booking id>`), so a job retried after a crash, or after a timeout on a send that actually succeeded, doesn't email the same tickets twice.
+- **Pacing.** The email queue sends at most 2 emails a second (Resend's default API limit), across all workers; raise `MAIL_RATE_PER_SECOND` if Resend raises yours.
+- **Retries only when they can help.** Rate limits and Resend outages are retried with backoff. A bad API key, an unverified domain or a used-up quota go straight to the dead-letter queue (`GET /api/v1/admin/dead-letters`) with Resend's message; fix the cause, then retry them from there. Either way no email is lost.
+
+Any SMTP provider works too: `MAIL_TRANSPORT=smtp` and `SMTP_URL=smtps://USERNAME:PASSWORD@host:465` (URL-encode special characters: `@` becomes `%40`). You lose the idempotency keys and the precise error handling.
 
 ## Scaling beyond one box
 

@@ -261,6 +261,8 @@ export interface NotificationsTable {
   status: Generated<'sending' | 'sent'>;
   createdAt: CreatedAt;
   sentAt: Date | null;
+  /** The email provider's id for the message (Resend's email id; the Message-ID over SMTP). */
+  providerMessageId: string | null;
 }
 
 export interface DB {

@@ -149,7 +149,7 @@ It only filters out requests that would lose anyway. Postgres makes the actual d
 
 1. `src/jobs/queues.ts` (the job types), then `src/jobs/outbox.ts` (enqueue + relay).
 2. `src/jobs/runner.ts`: retries, backoff, the dead-letter queue, logging with the request id.
-3. `src/jobs/handlers/email.ts` (`sendOnce`) and `src/lib/mailer.ts`.
+3. `src/jobs/handlers/email.ts` (`sendOnce`), `src/lib/mailer.ts` and `src/lib/resend.ts`: email transports, idempotency keys, and which provider errors are worth retrying ([ADR 0012](adr/0012-resend.md)).
 4. `src/modules/tickets/signing.ts` and `service.ts`: Ed25519 tickets, one-shot check-in.
 5. `src/modules/events/posters.ts` and `src/jobs/handlers/media.ts`: presigned uploads and resizing.
 6. `src/worker.ts` and `src/jobs/schedules.ts`.
@@ -170,7 +170,12 @@ If the process dies (or Redis is unreachable) between the commit and the enqueue
 
 <details><summary>At-least-once delivery means a job can run twice. How does the booking email avoid being sent twice?</summary>
 
-`sendOnce` creates (or finds) the `notifications` row for that message, locks it for the duration of the send, and skips if it's already `sent`. A concurrent duplicate waits on the lock, then sees `sent`. The one remaining gap is a crash after the mail server accepted the email but before the commit: the unavoidable edge of at-least-once delivery.
+`sendOnce` creates (or finds) the `notifications` row for that message, locks it for the duration of the send, and skips if it's already `sent`. A concurrent duplicate waits on the lock, then sees `sent`. That leaves a crash after the provider accepted the email but before the commit. Over SMTP that gap is unavoidable. With Resend, the send carries an idempotency key (`booking-confirmed/<booking id>`), and Resend won't send the same key twice within 24 hours.
+</details>
+
+<details><summary>Which email failures should a job retry, and which should go straight to the dead-letter queue?</summary>
+
+Retry what time can fix: a rate limit (429), a concurrent request with the same key, a provider outage (5xx), a timeout. Dead-letter what it can't: a bad API key, an unverified sending domain, an invalid address, or a used-up quota (it resets hours later, far beyond the job's backoff). Retrying those only delays the moment someone learns what to fix. See `src/lib/resend.ts`.
 </details>
 
 <details><summary>Why sign tickets with Ed25519 rather than store a random code?</summary>

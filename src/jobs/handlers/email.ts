@@ -9,7 +9,7 @@ import {
   refundProcessedEmail,
   type BookingForEmail,
 } from '../../emails/templates.js';
-import { sendMail } from '../../lib/mailer.js';
+import { sendMail, type Mail } from '../../lib/mailer.js';
 import { hashToken, newOpaqueToken } from '../../modules/auth/tokens.js';
 import { issueVerificationToken } from '../../modules/auth/verification.js';
 import { qrPng, ticketsForBooking } from '../../modules/tickets/service.js';
@@ -21,14 +21,15 @@ import type { Jobs } from '../queues.js';
  *
  * The notification row is locked for the duration of the send. A concurrent duplicate job
  * waits, then sees 'sent' and skips. A retry after a failed send sees 'sending' and tries
- * again. The only remaining duplicate is a crash between the SMTP success and the commit,
- * the unavoidable edge of at-least-once delivery.
+ * again. That leaves one gap: a crash after the provider accepted the email but before this
+ * transaction committed. The idempotency key closes it with Resend, which won't send the same
+ * key twice within 24 hours (over SMTP, that edge of at-least-once delivery remains).
  */
 export async function sendOnce(
   kind: string,
   refId: string,
   userId: string | null,
-  send: () => Promise<void>,
+  mail: Mail,
 ): Promise<'sent' | 'already_sent'> {
   return db.transaction().execute(async (trx) => {
     await trx
@@ -45,10 +46,10 @@ export async function sendOnce(
       .executeTakeFirstOrThrow();
     if (row.status === 'sent') return 'already_sent';
 
-    await send();
+    const result = await sendMail(mail, { idempotencyKey: `${kind}/${refId}`, category: kind });
     await trx
       .updateTable('notifications')
-      .set({ status: 'sent', sentAt: sql`now()` })
+      .set({ status: 'sent', sentAt: sql`now()`, providerMessageId: result.id })
       .where('kind', '=', kind)
       .where('refId', '=', refId)
       .execute();
@@ -132,14 +133,17 @@ export const passwordReset: JobHandler<Jobs['email']['password-reset']> = async 
 
   // The token goes in the URL fragment (#), which browsers never send to servers: it can't
   // leak through access logs, proxies or Referer headers.
-  await sendMail(
+  // No idempotency key: each reset mints a new token and invalidates the old ones, so a retry
+  // must send its own link. A duplicate after a crash is harmless: the newest link works.
+  const { id } = await sendMail(
     passwordResetEmail(
       user,
       `${config.APP_URL}/reset-password#token=${token}`,
       config.PASSWORD_RESET_TTL_MINUTES,
     ),
+    { category: 'password-reset' },
   );
-  return { sent: true };
+  return { sent: true, messageId: id };
 };
 
 /**
@@ -159,14 +163,15 @@ export const emailVerification: JobHandler<Jobs['email']['verify-email']> = asyn
   }
   const token = await issueVerificationToken(db, user.id);
   // Like reset links, the token travels in the URL fragment, which browsers never send to servers.
-  await sendMail(
+  const { id } = await sendMail(
     emailVerificationEmail(
       user,
       `${config.APP_URL}/verify-email#token=${token}`,
       config.EMAIL_VERIFICATION_TTL_HOURS,
     ),
+    { category: 'verify-email' },
   );
-  return { sent: true };
+  return { sent: true, messageId: id };
 };
 
 export const bookingConfirmed: JobHandler<Jobs['email']['booking-confirmed']> = async (job, log) => {
@@ -178,8 +183,11 @@ export const bookingConfirmed: JobHandler<Jobs['email']['booking-confirmed']> = 
 
   const tickets = (await ticketsForBooking(booking.id)).filter((t) => t.status === 'valid');
   const withQr = await Promise.all(tickets.map(async (t) => ({ ...t, qrPng: await qrPng(t.token) })));
-  const outcome = await sendOnce('booking-confirmed', booking.id, booking.userId, () =>
-    sendMail(bookingConfirmedEmail(booking, forEmail(booking), withQr)),
+  const outcome = await sendOnce(
+    'booking-confirmed',
+    booking.id,
+    booking.userId,
+    bookingConfirmedEmail(booking, forEmail(booking), withQr),
   );
   return { outcome, tickets: tickets.length };
 };
@@ -198,8 +206,11 @@ export const eventReminder: JobHandler<Jobs['email']['event-reminder']> = async 
   const seats = (await ticketsForBooking(booking.id))
     .filter((t) => t.status === 'valid')
     .map((t) => `${t.section}, row ${t.row}, seat ${t.number}`);
-  const outcome = await sendOnce('event-reminder', booking.id, booking.userId, () =>
-    sendMail(eventReminderEmail(booking, forEmail(booking), seats)),
+  const outcome = await sendOnce(
+    'event-reminder',
+    booking.id,
+    booking.userId,
+    eventReminderEmail(booking, forEmail(booking), seats),
   );
   return { outcome };
 };
@@ -215,15 +226,16 @@ export const refundProcessed: JobHandler<Jobs['email']['refund-processed']> = as
     .where('r.id', '=', job.data.refundId)
     .executeTakeFirst();
   if (!refund) return { sent: false };
-  const outcome = await sendOnce('refund-processed', refund.id, refund.userId, () =>
-    sendMail(
-      refundProcessedEmail(refund, {
-        reason: refund.reason,
-        amountCents: refund.amountCents,
-        currency: refund.currency.trim(),
-        eventTitle: refund.title,
-      }),
-    ),
+  const outcome = await sendOnce(
+    'refund-processed',
+    refund.id,
+    refund.userId,
+    refundProcessedEmail(refund, {
+      reason: refund.reason,
+      amountCents: refund.amountCents,
+      currency: refund.currency.trim(),
+      eventTitle: refund.title,
+    }),
   );
   return { outcome };
 };

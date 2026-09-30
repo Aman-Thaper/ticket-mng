@@ -161,7 +161,15 @@ Tickets are delivered by email, to the address you log in with, so that address 
 2. **Confirm.** Click the link. Until then the seat map shows a banner (with "resend") and booking is disabled.
 3. **Book and pay.** Your tickets appear on the page, and an email with one QR code per seat goes to that address. The QR images are embedded inline, so they show in Gmail, Outlook and Apple Mail, and are attached as PNGs too.
 
-Locally every email is caught by Mailpit (http://localhost:8025). To receive them in a real inbox, point `SMTP_URL` at a real mail server (see `.env.example` for Gmail, and [DEPLOY.md](docs/DEPLOY.md#email) for production). Why booking waits for the confirmation: [ADR 0011](docs/adr/0011-email-verification.md).
+**Sending real email: Resend.** Emails go out through [Resend](https://resend.com)'s API. Ticket emails carry idempotency keys, so a retried job never emails the same tickets twice, and the email queue is paced to Resend's rate limit. Locally, everything is caught by Mailpit (http://localhost:8025) instead. To send for real, add these to `.env`:
+
+```bash
+MAIL_TRANSPORT=resend
+RESEND_API_KEY=re_...                          # resend.com/api-keys
+MAIL_FROM="Ticket MNG <onboarding@resend.dev>" # until your domain is verified: delivers only to your Resend account's email
+```
+
+To email anyone, verify a domain at resend.com/domains and send from it: see [DEPLOY.md](docs/DEPLOY.md#email). Why booking waits for the confirmation: [ADR 0011](docs/adr/0011-email-verification.md). Why Resend, and how its failures are handled: [ADR 0012](docs/adr/0012-resend.md).
 
 ## Design notes
 

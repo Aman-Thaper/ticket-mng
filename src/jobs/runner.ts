@@ -61,6 +61,8 @@ export function createWorker(
   queue: QueueName,
   handlers: Record<string, JobHandler<never>>,
   concurrency: number,
+  /** At most `max` jobs per `duration` ms, across every worker of this queue (kept in Redis). */
+  limiter?: { max: number; duration: number },
 ) {
   const worker = new Worker(
     queue,
@@ -88,7 +90,12 @@ export function createWorker(
         throw err;
       }
     },
-    { connection: redisConnection(), prefix: config.QUEUE_PREFIX, concurrency },
+    {
+      connection: redisConnection(),
+      prefix: config.QUEUE_PREFIX,
+      concurrency,
+      ...(limiter ? { limiter } : {}),
+    },
   );
 
   worker.on('failed', (job, err) => {

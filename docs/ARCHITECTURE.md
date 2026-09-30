@@ -215,6 +215,8 @@ Enqueueing straight to Redis from a request can't be atomic with the database: a
 | `media`       | process-poster (sharp: WebP in three sizes)                                      | 2           |
 | `maintenance` | send-event-reminders (every 15 min), cleanup (daily, 03:00 UTC)                  | 1           |
 
+Email leaves through [Resend](https://resend.com)'s API in production (Mailpit over SMTP locally, in memory in tests: `MAIL_TRANSPORT`). Ticket, reminder and refund emails carry an idempotency key (`booking-confirmed/<booking id>`), so even a crash between "Resend accepted it" and "we recorded it" can't send them twice. The email queue is paced to Resend's rate limit (2/s) across all workers. See [ADR 0012](adr/0012-resend.md).
+
 ## Live seat maps
 
 ```mermaid
@@ -257,6 +259,7 @@ sequenceDiagram
 | Worker down                            | Requests still succeed. Outbox rows accumulate (`outbox_unpublished` alerts on age) and are published when a worker returns. Lapsed holds are still free to take (lazy expiry).                                                                                                                                              |
 | Webhook lost or delayed                | The provider retries. Two delivered at once, or out of order: deduplication plus reconciliation converge on the provider's state.                                                                                                                                                                                            |
 | A job keeps failing                    | 5 attempts with backoff, then the dead-letter queue for an admin.                                                                                                                                                                                                                                                            |
+| Email provider trouble                 | Rate limits and outages: retried with backoff (the queue is also paced to the limit). A bad API key, an unverified domain or a used-up quota: dead-lettered at once with the provider's message, then retried by an admin once fixed. No email is lost.                                                                      |
 | Payment succeeds after the hold lapsed | Seats still free: the booking is confirmed anyway. Seats sold: automatic refund and an email.                                                                                                                                                                                                                                |
 
 ## Observability
