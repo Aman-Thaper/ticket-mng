@@ -3,3 +3,4 @@ coverage/
 .dev/
 package-lock.json
 dist/
+docs/beginner-guide/

@@ -4,7 +4,7 @@ An event ticketing backend, built in seven phases to practise the hard parts: co
 
 **Stack:** Node 24 · TypeScript · Fastify 5 · Zod 4 (validation, serialization and OpenAPI from one schema) · PostgreSQL 18 · Kysely (typed SQL, no ORM) · Redis · BullMQ · WebSockets · Nginx · Docker · Prometheus + Grafana · Vitest, Playwright, k6 · GitHub Actions
 
-**Docs:** [Architecture](docs/ARCHITECTURE.md) (diagrams of every flow) · [Decision records](docs/adr/) (why each choice) · [Study guide](docs/STUDY-GUIDE.md) (how to learn this codebase) · [Deploying](docs/DEPLOY.md) (VPS, HTTPS, zero-downtime rollouts)
+**Docs:** [Architecture](docs/ARCHITECTURE.md) (diagrams of every flow) · [Decision records](docs/adr/) (why each choice) · [Study guide](docs/STUDY-GUIDE.md) (how to learn this codebase) · [Deploying](docs/DEPLOY.md) (VPS, HTTPS, zero-downtime rollouts) · [Beginner's guide (PDF)](docs/BEGINNER-GUIDE.pdf) (every part explained from zero)
 
 ## Roadmap
 
