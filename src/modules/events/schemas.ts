@@ -50,7 +50,12 @@ export const EventDto = z
   .object({
     id: z.uuid(),
     organizerId: z.uuid(),
-    venue: z.object({ id: z.uuid(), name: z.string(), city: z.string() }),
+    venue: z.object({
+      id: z.uuid(),
+      name: z.string(),
+      city: z.string(),
+      timezone: z.string().describe('IANA time zone: show the event times in it'),
+    }),
     title: z.string(),
     description: z.string(),
     category: z.enum(EVENT_CATEGORIES),
@@ -134,12 +139,24 @@ export const ListEventsQuery = z.object({
     .describe('draft requires auth: organizers see their own drafts, admins see all'),
   from: TimestampInput.optional().describe('Only events starting at or after this time (default: now)'),
   to: TimestampInput.optional().describe('Only events starting before this time'),
+  onSale: z
+    .enum(['true', 'false'])
+    .transform((v) => v === 'true')
+    .optional()
+    .describe('Only events you can book now: published, upcoming, sales open, and with seats for sale'),
   limit: Limit,
   cursor: z.string().optional().describe("Opaque cursor from the previous page's `page.nextCursor`"),
 });
 
+export const EventListItem = EventDto.extend({
+  seats: z
+    .object({ total: z.int(), available: z.int() })
+    .describe('Approximate (lists are cached for up to 30 s); the seat map has live counts'),
+  priceRange: z.object({ minCents: z.int(), maxCents: z.int() }).nullable(),
+}).meta({ id: 'EventListItem' });
+
 export const EventListResponse = z.object({
-  data: z.array(EventDto),
+  data: z.array(EventListItem),
   page: z.object({ limit: z.int(), nextCursor: z.string().nullable() }),
 });
 

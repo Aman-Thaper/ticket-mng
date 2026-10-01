@@ -1,17 +1,27 @@
-// Live seat map demo. Plain browser JavaScript: no build step, no dependencies.
+// The event page: details, the live seat map, and checkout. Plain browser JavaScript: no
+// build step, no dependencies.
 //
-// The flow it demonstrates:
 //   1. open a WebSocket to /api/v1/events/:id/live and wait for "hello"
 //   2. load the seat-map snapshot, then apply live updates by seat version
 //   3. select seats → hold them (with an Idempotency-Key) → countdown
 //      (visitors log in first; booking needs a confirmed email, since tickets are emailed)
 //   4. pay with a test card at the fake gateway → the webhook confirms the booking
-//   5. show the QR tickets
+//   5. show the QR tickets (they're emailed too, and listed under My tickets)
 
+import {
+  availabilityTag,
+  categoryOf,
+  dateBadge,
+  eventHue,
+  eventIcon,
+  longDate,
+  money,
+  time,
+} from './format.js';
+import { mountHeader } from './header.js';
 import {
   api,
   describeError,
-  logout,
   onSessionChange,
   reloadUser,
   restoreSession,
@@ -25,6 +35,7 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const CELL = 18; // grid pitch in px
 const SEAT = 14; // seat size in px
 const LABEL_WIDTH = 90;
+const EVENT_ID = /^\/events\/([0-9a-f-]{36})\/?$/i.exec(location.pathname)?.[1] ?? null;
 
 const state = {
   event: null,
@@ -41,9 +52,6 @@ const state = {
 };
 
 // ─── small helpers ─────────────────────────────────────────────────────────────────────
-
-const money = (cents, currency) =>
-  new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(cents / 100);
 
 function log(message) {
   const item = document.createElement('li');
@@ -77,87 +85,19 @@ async function withNetworkRetry(request, attempts = 3) {
   }
 }
 
-// ─── account: header, menu, email confirmation ─────────────────────────────────────────
-// The API client and token refresh live in session.js, shared with the account pages.
+// ─── account ───────────────────────────────────────────────────────────────────────────
+// The header (menu, email-confirmation banner) is shared: header.js. The API client and
+// token refresh: session.js.
 
-const initials = (name) =>
-  name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((word) => word[0].toUpperCase())
-    .join('') || '?';
-
-function renderAccount(user) {
-  $('guest').hidden = Boolean(user);
-  $('user-menu').hidden = !user;
-  const here = state.event ? `/?event=${state.event.id}` : location.pathname + location.search;
-  $('login-link').href = withNext('/login', here);
-  $('signup-link').href = withNext('/signup', here);
-  if (user) {
-    $('avatar').textContent = initials(user.name);
-    $('menu-name').textContent = user.name.split(/\s+/)[0];
-    $('menu-full-name').textContent = user.name;
-    $('menu-email').textContent = user.email;
-    $('menu-verified').textContent = user.emailVerified ? 'Email confirmed' : 'Email not confirmed yet';
-    $('menu-verified').classList.toggle('pending', !user.emailVerified);
-  } else {
-    closeMenu();
-  }
-  $('verify-banner').hidden = !user || user.emailVerified;
-  if (user && !user.emailVerified) $('banner-email').textContent = user.email;
-  updateCheckout();
-}
-onSessionChange(renderAccount);
-
-function openMenu() {
-  $('menu').hidden = false;
-  $('menu-button').setAttribute('aria-expanded', 'true');
-  $('logout').focus();
-}
-
-function closeMenu() {
-  $('menu').hidden = true;
-  $('menu-button').setAttribute('aria-expanded', 'false');
-}
-
-$('menu-button').addEventListener('click', () => ($('menu').hidden ? openMenu() : closeMenu()));
-document.addEventListener('click', (e) => {
-  if (!$('user-menu').contains(e.target)) closeMenu();
+mountHeader({
+  active: 'events',
+  onLogout: () => {
+    clearBooking();
+    showMessage('');
+    log('logged out');
+  },
 });
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('menu').hidden) {
-    closeMenu();
-    $('menu-button').focus();
-  }
-});
-
-$('logout').addEventListener('click', async () => {
-  await logout();
-  clearBooking();
-  showMessage('');
-  log('logged out');
-});
-
-$('resend').addEventListener('click', async () => {
-  $('resend').disabled = true;
-  try {
-    const { message } = await api('/auth/verify-email/resend', { method: 'POST' });
-    $('banner-note').textContent = message;
-  } catch (err) {
-    if (err.code === 'EMAIL_ALREADY_VERIFIED') await reloadUser();
-    else $('banner-note').textContent = describeError(err);
-  } finally {
-    $('resend').disabled = false;
-  }
-});
-
-// Confirmed the address in another tab (the link opens a new one)? Notice on return.
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && session.user && !session.user.emailVerified) {
-    reloadUser().catch(() => {});
-  }
-});
+onSessionChange(() => updateCheckout());
 
 /** After logging in to book, bring back the seats the visitor had picked. */
 function restorePendingSelection(eventId) {
@@ -182,59 +122,92 @@ function restorePendingSelection(eventId) {
   }
 }
 
-// ─── events ────────────────────────────────────────────────────────────────────────────
-
-async function loadEvents() {
-  const { data } = await api('/events?limit=50');
-  const select = $('event-select');
-  select.replaceChildren();
-  for (const ev of data) {
-    const option = document.createElement('option');
-    option.value = ev.id;
-    option.textContent = `${new Date(ev.startsAt).toLocaleDateString()} · ${ev.title} · ${ev.venue.city}`;
-    select.append(option);
-  }
-  const wanted = new URLSearchParams(location.search).get('event');
-  if (wanted && ![...select.options].some((o) => o.value === wanted)) {
-    const option = document.createElement('option');
-    option.value = wanted;
-    option.textContent = wanted;
-    select.prepend(option);
-  }
-  select.value = wanted ?? data[0]?.id ?? '';
-  if (select.value) await openEvent(select.value);
-  else $('event-title').textContent = 'No upcoming events';
+/** Back on an event with an unpaid hold (a reload, another tab)? Pick it up again. */
+async function resumePendingHold() {
+  if (!session.user || state.booking) return;
+  const { data } = await api('/bookings?status=pending&limit=20');
+  const hold = data.find((b) => b.event.id === EVENT_ID && Date.parse(b.expiresAt) > Date.now());
+  if (!hold) return;
+  state.selected.clear();
+  showBooking(hold);
+  updateCheckout();
+  showMessage('You have seats on hold for this event. Pay before the timer runs out.', true);
 }
 
-$('event-select').addEventListener('change', (e) => {
-  const url = new URL(location.href);
-  url.searchParams.set('event', e.target.value);
-  history.replaceState(null, '', url);
-  void openEvent(e.target.value);
-});
+// ─── the event ─────────────────────────────────────────────────────────────────────────
 
 async function openEvent(eventId) {
-  clearBooking();
-  state.selected.clear();
-  state.seats.clear();
-  $('seat-map').replaceChildren();
   try {
     state.event = await api(`/events/${eventId}`);
   } catch (err) {
-    $('event-title').textContent = 'Event not found';
-    showMessage(err.message);
-    return;
+    showNotFound(err.status === 404 ? null : describeError(err));
+    return false;
   }
-  $('event-title').textContent = state.event.title;
-  const option = [...$('event-select').options].find((o) => o.value === eventId);
-  if (option)
-    option.textContent = `${new Date(state.event.startsAt).toLocaleDateString()} · ${state.event.title} · ${state.event.venue.city}`;
-  $('event-meta').textContent =
-    `${new Date(state.event.startsAt).toLocaleString()} · ${state.event.venue.name}, ${state.event.venue.city}` +
-    (state.event.priceRange
-      ? ` · ${money(state.event.priceRange.minCents, state.event.currency)}–${money(state.event.priceRange.maxCents, state.event.currency)}`
-      : '');
+  renderEventHeader(state.event);
   connectLive(eventId);
+  return true;
+}
+
+function renderEventHeader(ev) {
+  const category = categoryOf(ev.category);
+  const hue = String(eventHue(ev.id, ev.category));
+  document.title = `${ev.title} · Ticket MNG`;
+  $('event-hero').style.setProperty('--hue', hue);
+
+  const art = $('event-art');
+  art.style.setProperty('--hue', hue);
+  art.replaceChildren();
+  if (ev.poster?.urls?.medium) {
+    const img = document.createElement('img');
+    img.className = 'card-poster';
+    img.src = ev.poster.urls.medium;
+    img.alt = '';
+    art.append(img);
+  } else {
+    const icon = document.createElement('span');
+    icon.className = 'card-icon';
+    icon.textContent = eventIcon(ev.id, ev.category);
+    art.append(icon);
+  }
+  const tz = ev.venue.timezone;
+  const badge = dateBadge(ev.startsAt, tz);
+  const date = document.createElement('div');
+  date.className = 'date-badge';
+  for (const [cls, text] of [
+    ['month', badge.month],
+    ['day', badge.day],
+  ]) {
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = text;
+    date.append(span);
+  }
+  art.append(date);
+
+  $('event-category').textContent = category.single;
+  const tag = availabilityTag(ev.seats);
+  $('event-availability').hidden = !tag;
+  if (tag) $('event-availability').textContent = tag.text;
+  $('event-title').textContent = ev.title;
+  $('event-date').textContent = longDate(ev.startsAt, tz);
+  $('event-time').textContent = `· ${time(ev.startsAt, tz)} – ${time(ev.endsAt, tz)} (${ev.venue.city} time)`;
+  $('event-venue').textContent = `${ev.venue.name}, ${ev.venue.city}`;
+  $('event-price').textContent = ev.priceRange
+    ? ev.priceRange.minCents === ev.priceRange.maxCents
+      ? money(ev.priceRange.minCents, ev.currency)
+      : `${money(ev.priceRange.minCents, ev.currency)} – ${money(ev.priceRange.maxCents, ev.currency)}`
+    : 'Tickets not on sale';
+  $('event-description').textContent = ev.description ?? '';
+}
+
+function showNotFound(detail) {
+  document.title = 'Event not found · Ticket MNG';
+  $('event-title').textContent = detail ? "Couldn't load this event" : 'Event not found';
+  $('event-description').textContent =
+    detail ?? 'It may have been cancelled or moved. Browse all events to find something else.';
+  $('event-category').hidden = true;
+  document.querySelector('.event-facts').hidden = true;
+  document.querySelector('main.layout').hidden = true;
 }
 
 // ─── live updates ──────────────────────────────────────────────────────────────────────
@@ -482,7 +455,7 @@ $('hold-button').addEventListener('click', async () => {
     } catch {
       // storage unavailable (private mode): they'll pick again
     }
-    location.assign(withNext('/login', `/?event=${state.event.id}`));
+    location.assign(withNext('/login', `/events/${state.event.id}`));
     return;
   }
   const seatIds = [...state.selected];
@@ -545,6 +518,7 @@ function clearBooking() {
   state.booking = null;
   $('booking').hidden = true;
   $('tickets').replaceChildren();
+  $('tickets-link').hidden = true;
   repaintAll();
   updateCheckout();
 }
@@ -588,6 +562,7 @@ async function waitForOutcome(bookingId) {
       showMessage(`Paid! Your tickets are below, and we've emailed them to ${session.user.email}.`, true);
       log('booking confirmed by webhook');
       await showTickets(bookingId);
+      $('tickets-link').hidden = false;
       return;
     }
     if (booking.payment?.lastError) {
@@ -634,8 +609,9 @@ $('cancel-button').addEventListener('click', async () => {
 
 // ─── start ─────────────────────────────────────────────────────────────────────────────
 
-(async () => {
-  renderAccount(null);
+if (!EVENT_ID) {
+  showNotFound(null);
+} else {
   await restoreSession();
-  await loadEvents().catch((err) => showMessage(describeError(err)));
-})();
+  if (await openEvent(EVENT_ID)) await resumePendingHold().catch(() => {});
+}

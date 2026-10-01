@@ -52,6 +52,7 @@ function selectEvents(conn: Kysely<DB>) {
       'v.id as venueId',
       'v.name as venueName',
       'v.city as venueCity',
+      'v.timezone as venueTimezone',
     ]);
 }
 
@@ -60,7 +61,7 @@ type EventRow = Awaited<ReturnType<ReturnType<typeof selectEvents>['executeTakeF
 const toEventDto = (r: EventRow): z.infer<typeof EventDto> => ({
   id: r.id,
   organizerId: r.organizerId,
-  venue: { id: r.venueId, name: r.venueName, city: r.venueCity },
+  venue: { id: r.venueId, name: r.venueName, city: r.venueCity, timezone: r.venueTimezone },
   title: r.title,
   description: r.description,
   category: r.category,
@@ -211,6 +212,28 @@ const venueOverlap = () =>
 
 type ListQuery = z.infer<typeof ListEventsQuery>;
 
+/**
+ * Seat counts and price range for a page of events, in one grouped query. "Available" here is
+ * a plain status count (a lapsed hold counts as taken until it's swept, within 30 s): close
+ * enough for "Selling fast" on a card. The event page shows exact, live numbers.
+ */
+async function seatStats(eventIds: string[]) {
+  if (!eventIds.length) return new Map<string, never>();
+  const rows = await db
+    .selectFrom('eventSeats')
+    .where('eventId', 'in', eventIds)
+    .groupBy('eventId')
+    .select((eb) => [
+      'eventId',
+      eb.fn.countAll<number>().as('total'),
+      sql<number>`count(*) FILTER (WHERE status = 'available')`.as('available'),
+      eb.fn.min('priceCents').as('minCents'),
+      eb.fn.max('priceCents').as('maxCents'),
+    ])
+    .execute();
+  return new Map(rows.map((r) => [r.eventId, r]));
+}
+
 async function listEvents({
   q,
   city,
@@ -220,10 +243,11 @@ async function listEvents({
   status,
   from,
   to,
+  onSale,
   limit,
   cursor,
 }: ListQuery) {
-  let query = selectEvents(db).where('e.status', '=', status);
+  let query = selectEvents(db).where('e.status', '=', onSale ? 'published' : status);
   if (q) query = query.where(sql<boolean>`e.search @@ websearch_to_tsquery('english', ${q})`);
   if (city) query = query.where(sql`lower(v.city)`, '=', city.toLowerCase());
   if (category) query = query.where('e.category', '=', category);
@@ -232,6 +256,12 @@ async function listEvents({
   // Upcoming events by default. Pass an earlier `from` to include past ones.
   query = query.where('e.startsAt', '>=', from ? new Date(from) : new Date());
   if (to) query = query.where('e.startsAt', '<', new Date(to));
+  if (onSale) {
+    // Bookable right now: ticket sales have opened, and the event has seats to sell.
+    query = query
+      .where((eb) => eb.or([eb('e.salesStartAt', 'is', null), eb('e.salesStartAt', '<=', sql<Date>`now()`)]))
+      .where(sql<boolean>`EXISTS (SELECT 1 FROM event_seats es WHERE es.event_id = e.id)`);
+  }
   if (cursor) {
     const c = decodeCursor(cursor);
     // A row-value comparison matches the (status, starts_at, id) index exactly.
@@ -248,8 +278,16 @@ async function listEvents({
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page.at(-1);
+  const stats = await seatStats(page.map((r) => r.id));
   return {
-    data: page.map(toEventDto),
+    data: page.map((r) => {
+      const s = stats.get(r.id);
+      return {
+        ...toEventDto(r),
+        seats: { total: s?.total ?? 0, available: s?.available ?? 0 },
+        priceRange: s ? { minCents: s.minCents, maxCents: s.maxCents } : null,
+      };
+    }),
     page: { limit, nextCursor: hasMore && last ? encodeCursor({ at: last.startsAt, id: last.id }) : null },
   };
 }

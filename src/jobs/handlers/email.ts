@@ -77,6 +77,7 @@ async function loadBookingForEmail(bookingId: string) {
       'v.name as venueName',
       'v.address as venueAddress',
       'v.city',
+      'v.timezone',
     ])
     .where('b.id', '=', bookingId)
     .executeTakeFirst();
@@ -91,6 +92,7 @@ const forEmail = (b: BookingRow): BookingForEmail => ({
   event: {
     title: b.title,
     startsAt: b.startsAt,
+    timezone: b.timezone,
     venueName: b.venueName,
     venueAddress: b.venueAddress,
     city: b.city,

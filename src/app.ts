@@ -60,7 +60,7 @@ const genReqId = (req: { headers: Record<string, string | string[] | undefined> 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 /** Browser security policy for the demo pages: only our own scripts, styles and API. */
-const ACCOUNT_PAGES = ['login', 'signup', 'forgot-password', 'reset-password', 'verify-email'] as const;
+const PAGES = ['login', 'signup', 'forgot-password', 'reset-password', 'verify-email', 'my-tickets'] as const;
 
 const STATIC_CSP = [
   "default-src 'self'",
@@ -203,10 +203,11 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
       reply.header('referrer-policy', 'no-referrer');
     },
   });
-  // The account pages at clean URLs: /login rather than /login.html.
-  for (const page of ACCOUNT_PAGES) {
+  // Pages at clean URLs: /login rather than /login.html, /events/<id> for an event.
+  for (const page of PAGES) {
     app.get(`/${page}`, { schema: { hide: true } }, (_req, reply) => reply.sendFile(`${page}.html`));
   }
+  app.get('/events/:id', { schema: { hide: true } }, (_req, reply) => reply.sendFile('event.html'));
 
   await app.register(healthRoutes);
   // The simulated payment provider's browser API (dev and test only; refused in production).

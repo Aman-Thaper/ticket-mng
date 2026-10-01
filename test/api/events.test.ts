@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../src/db/index.js';
+import { bumpGenerations, generationKey } from '../../src/lib/cache.js';
 import { createEvent, createUser, createVenue, inDays, publish, useApp, type TestUser } from '../helpers.js';
 
 describe('events', () => {
@@ -290,6 +291,38 @@ describe('events', () => {
       const res = await t.app.inject({ url: '/api/v1/events?cursor=abc' });
       expect(res.statusCode).toBe(400);
       expect(res.json().error.code).toBe('INVALID_CURSOR');
+    });
+
+    it("gives each event its seat counts, price range and venue's time zone", async () => {
+      const [first] = (await t.app.inject({ url: '/api/v1/events?limit=1' })).json().data;
+      expect(first.seats).toEqual({ total: 14, available: 14 });
+      expect(first.priceRange).toEqual({ minCents: 4500, maxCents: 8000 });
+      expect(first.venue).toMatchObject({ city: 'Berlin', timezone: 'UTC' });
+    });
+
+    it('onSale=true lists only events bookable now: sales open and seats for sale', async () => {
+      const onSale = async () =>
+        (await t.app.inject({ url: '/api/v1/events?onSale=true&limit=100' })).json().data;
+      expect(await onSale()).toHaveLength(25);
+
+      // Sales that haven't opened yet (an event in 20 days, on sale from day 5), and a
+      // published event with no seats at all.
+      const all = (await t.app.inject({ url: '/api/v1/events?limit=100' })).json().data;
+      const [later, empty] = [all[19], all[0]];
+      await db
+        .updateTable('events')
+        .set({ salesStartAt: new Date(inDays(5)) })
+        .where('id', '=', later.id)
+        .execute();
+      await db.deleteFrom('eventSeats').where('eventId', '=', empty.id).execute();
+      await bumpGenerations(generationKey.eventLists);
+
+      const ids = (await onSale()).map((e: { id: string }) => e.id);
+      expect(ids).toHaveLength(23);
+      expect(ids).not.toContain(later.id);
+      expect(ids).not.toContain(empty.id);
+      // Without the filter, both are still listed (they're published).
+      expect((await t.app.inject({ url: '/api/v1/events?limit=100' })).json().data).toHaveLength(25);
     });
   });
 });

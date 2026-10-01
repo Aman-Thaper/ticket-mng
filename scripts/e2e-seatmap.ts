@@ -123,7 +123,7 @@ const newPage = async (name: string) => {
   return page;
 };
 const openMap = async (page: Page) => {
-  await page.goto(`${BASE}/?event=${event.id}`);
+  await page.goto(`${BASE}/events/${event.id}`);
   await page.locator('#live-status', { hasText: 'live' }).waitFor({ timeout: 10_000 });
   await page.locator('rect.seat').first().waitFor();
 };
@@ -136,7 +136,7 @@ try {
   const buyer = await newPage('buyer');
 
   // ── sign up ──
-  await buyer.goto(`${BASE}/signup?next=${encodeURIComponent(`/?event=${event.id}`)}`);
+  await buyer.goto(`${BASE}/signup?next=${encodeURIComponent(`/events/${event.id}`)}`);
   await buyer.locator('#name').fill('E2E Buyer');
   await buyer.locator('#email').fill(buyerEmail);
   await buyer.locator('#password').fill(buyerPassword);
@@ -211,6 +211,23 @@ try {
   step(`watcher saw seat ${ids[0]} become "booked" live`);
   await watcher.screenshot({ path: '.dev/e2e-watcher-sold.png' });
 
+  // ── My tickets: the booking, with its QR codes ──
+  await buyer.goto(`${BASE}/my-tickets`);
+  const booking = buyer.locator('.booking', { hasText: 'E2E: Live Seat Map' }).first();
+  await booking.locator('button', { hasText: 'Show tickets' }).click();
+  await booking.locator('.qr-ticket img').nth(1).waitFor();
+  step(`My tickets lists the booking with its ${await booking.locator('.qr-ticket img').count()} QR codes`);
+
+  // ── the catalog: category rows, a category grid, and on to an event's seat map ──
+  const visitor = await newPage('visitor');
+  await visitor.goto(`${BASE}/`);
+  await visitor.locator('.event-row .card:not(.skeleton)').first().waitFor();
+  const rows = await visitor.locator('.event-row').count();
+  await visitor.locator('.chip[data-category="theatre"]').click();
+  await visitor.locator('.grid .card:not(.skeleton)').first().click();
+  await visitor.locator('rect.seat').first().waitFor();
+  step(`catalog shows ${rows} category row(s); the Theatre grid opens ${new URL(visitor.url()).pathname}`);
+
   if (consoleErrors.length) throw new Error(`browser console errors:\n${consoleErrors.join('\n')}`);
   step('no browser console errors');
   console.log(
@@ -221,5 +238,7 @@ try {
   process.exitCode = 1;
 } finally {
   await browser.close();
+  // Take the test event off the public catalog (its bookings stay, for inspection).
+  await db.updateTable('events').set({ status: 'draft' }).where('id', '=', event.id).execute();
   await Promise.all([db.destroy(), redis.quit()]);
 }

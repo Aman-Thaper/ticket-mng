@@ -8,6 +8,7 @@
     "migrate": "tsx src/db/migrate.ts latest",
     "migrate:down": "tsx src/db/migrate.ts down",
     "seed": "tsx scripts/seed.ts",
+    "stock": "tsx scripts/stock-events.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:unit": "vitest run --project unit",

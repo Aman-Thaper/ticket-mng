@@ -107,6 +107,8 @@ export interface VenuesTable {
   address: string;
   city: string;
   country: string;
+  /** IANA time zone, e.g. Europe/London: event times are shown in it. */
+  timezone: Generated<string>;
   capacity: number;
   createdAt: CreatedAt;
   updatedAt: UpdatedAt;

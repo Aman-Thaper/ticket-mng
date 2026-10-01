@@ -5,7 +5,7 @@ import { db } from '../../db/index.js';
 import type { Venue } from '../../db/types.js';
 import { notFound } from '../../lib/errors.js';
 import { escapeLike } from '../../lib/pagination.js';
-import { errors, IdParams, Limit, Timestamp } from '../../lib/schemas.js';
+import { errors, IdParams, Limit, Timestamp, TimeZone } from '../../lib/schemas.js';
 import { bearerAuth, requireRole } from '../auth/guard.js';
 import { generateSeats } from './layout.js';
 
@@ -18,6 +18,7 @@ export const VenueDto = z
     address: z.string(),
     city: z.string(),
     country: z.string(),
+    timezone: z.string().describe('IANA time zone; event times at this venue are local to it'),
     capacity: z.int(),
     createdAt: Timestamp,
   })
@@ -33,6 +34,7 @@ const toVenueDto = (v: Venue): z.infer<typeof VenueDto> => ({
   address: v.address,
   city: v.city,
   country: v.country,
+  timezone: v.timezone,
   capacity: v.capacity,
   createdAt: v.createdAt.toISOString(),
 });
@@ -49,6 +51,7 @@ const CreateVenueBody = z
     address: z.string().trim().min(1).max(300),
     city: z.string().trim().min(1).max(100),
     country: z.string().regex(/^[A-Z]{2}$/, 'Must be an ISO 3166-1 alpha-2 code, e.g. "US"'),
+    timezone: TimeZone.default('UTC').describe('IANA time zone, e.g. Europe/London'),
     sections: z.array(SectionSpec).min(1).max(50),
   })
   .superRefine((body, ctx) => {

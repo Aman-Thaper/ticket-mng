@@ -41,6 +41,11 @@ A route through this codebase, phase by phase: what each part teaches, which fil
 `OFFSET 100000` makes Postgres read and discard 100,000 rows, so deep pages get slower and rows shift when data changes between pages. Keyset (`WHERE (starts_at, id) > (cursor)`) jumps straight there using the index, at the same cost on any page, and is stable under inserts. Offset is fine for small tables where users want "page 3 of 12".
 </details>
 
+<details><summary>Times are stored in UTC. Whose time zone should a page show them in?</summary>
+
+The venue's. A show starts at 7:30 PM in Toronto for everyone; showing it in each viewer's zone would print a different time on every screen and on none of the tickets. So each venue has an IANA time zone (`venues.timezone`, migration 0009) and `Intl.DateTimeFormat({ timeZone })` formats with it. Store instants (UTC), display wall-clock times where the event happens, and never store "local time without a zone".
+</details>
+
 <details><summary>Why copy venue seats into event_seats instead of booking venue seats directly?</summary>
 
 The venue is a physical template; each event sells its own inventory with its own prices and status. Booking one event must not lock or change the template or other events' seats, and event rows can carry per-event state (status, booking, version).

@@ -10,7 +10,13 @@ export const BookingDto = z
     id: z.uuid(),
     status: z.enum(BOOKING_STATUSES),
     userId: z.uuid(),
-    event: z.object({ id: z.uuid(), title: z.string(), startsAt: Timestamp, venueName: z.string() }),
+    event: z.object({
+      id: z.uuid(),
+      title: z.string(),
+      startsAt: Timestamp,
+      venueName: z.string(),
+      timezone: z.string().describe("The venue's IANA time zone"),
+    }),
     items: z.array(
       z.object({
         seatId: z.int(),
@@ -62,6 +68,7 @@ function selectBookings() {
       'e.startsAt as eventStartsAt',
       'e.organizerId',
       'v.name as venueName',
+      'v.timezone as venueTimezone',
     ]);
 }
 
@@ -150,6 +157,7 @@ function toDto(
       title: b.eventTitle,
       startsAt: b.eventStartsAt.toISOString(),
       venueName: b.venueName,
+      timezone: b.venueTimezone,
     },
     items,
     totalCents: b.totalCents,

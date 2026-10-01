@@ -24,6 +24,19 @@ const { values } = parseArgs({
 const USERS = Number(values.users);
 const tag = `loadtest-${Date.now()}`;
 
+// Earlier runs' flash-sale events are spent: take them off the public catalog.
+await db
+  .updateTable('events')
+  .set({ status: 'draft' })
+  .where('title', '=', 'The Flash Sale')
+  .where('status', '=', 'published')
+  .where(
+    'organizerId',
+    'in',
+    db.selectFrom('users').select('id').where('email', 'like', 'loadtest-%@example.com'),
+  )
+  .execute();
+
 const organizer = await db
   .insertInto('users')
   .values({ email: `${tag}-organizer@example.com`, name: 'Load Test Organizer', role: 'organizer' })

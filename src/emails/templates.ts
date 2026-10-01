@@ -113,10 +113,9 @@ ${fallbackLink(link)}`,
 const money = (cents: number, currency: string) =>
   new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(cents / 100);
 
-// Venues don't store a time zone yet, so times are shown in UTC and labelled as such.
-const when = (d: Date) =>
-  new Intl.DateTimeFormat('en-GB', { dateStyle: 'full', timeStyle: 'short', timeZone: 'UTC' }).format(d) +
-  ' UTC';
+/** In the venue's time zone: a 7:30 PM show in Toronto is 7:30 PM wherever the reader is. */
+const when = (d: Date, timeZone: string) =>
+  `${new Intl.DateTimeFormat('en-US', { dateStyle: 'full', timeStyle: 'short', timeZone }).format(d)} (local time)`;
 
 export interface TicketForEmail {
   id: string;
@@ -130,7 +129,14 @@ export interface BookingForEmail {
   id: string;
   totalCents: number;
   currency: string;
-  event: { title: string; startsAt: Date; venueName: string; venueAddress: string; city: string };
+  event: {
+    title: string;
+    startsAt: Date;
+    timezone: string;
+    venueName: string;
+    venueAddress: string;
+    city: string;
+  };
 }
 
 /** The "When / Where" box shared by the booking emails. */
@@ -138,7 +144,7 @@ const eventDetails = (ev: BookingForEmail['event']) =>
   `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px">
 <tr><td style="padding:16px 18px">
 <div style="${LABEL}">When</div>
-<div style="font-weight:600;margin:2px 0 14px">${escape(when(ev.startsAt))}</div>
+<div style="font-weight:600;margin:2px 0 14px">${escape(when(ev.startsAt, ev.timezone))}</div>
 <div style="${LABEL}">Where</div>
 <div style="font-weight:600;margin-top:2px">${escape(ev.venueName)}</div>
 <div style="color:#475569">${escape(ev.venueAddress)}, ${escape(ev.city)}</div>
@@ -172,13 +178,13 @@ export function bookingConfirmedEmail(
     to: to.email,
     subject: `Your tickets: ${ev.title}`,
     text:
-      `Hi ${to.name},\n\nYou're going to ${ev.title}!\n${when(ev.startsAt)}\n${ev.venueName}, ${ev.venueAddress}, ${ev.city}\n\n` +
+      `Hi ${to.name},\n\nYou're going to ${ev.title}!\n${when(ev.startsAt, ev.timezone)}\n${ev.venueName}, ${ev.venueAddress}, ${ev.city}\n\n` +
       tickets.map((t) => `- ${seatLine(t)}`).join('\n') +
       `\n\nTotal paid: ${money(booking.totalCents, booking.currency)}\nBooking reference: ${booking.id}\n\n` +
       'Your QR tickets are attached. Show them at the door; each one can be scanned once.',
     html: layout({
       title: `You're going to ${ev.title}`,
-      preview: `${tickets.length} ticket${tickets.length === 1 ? '' : 's'} for ${when(ev.startsAt)}. Show the QR codes at the door.`,
+      preview: `${tickets.length} ticket${tickets.length === 1 ? '' : 's'} for ${when(ev.startsAt, ev.timezone)}. Show the QR codes at the door.`,
       body: `<p style="margin:0">Hi ${escape(to.name)}, your booking is confirmed. Here ${tickets.length === 1 ? 'is your ticket' : 'are your tickets'}.</p>
 ${eventDetails(ev)}
 ${ticketCards}
@@ -207,10 +213,10 @@ export function eventReminderEmail(
   return {
     to: to.email,
     subject: `Tomorrow: ${ev.title}`,
-    text: `Hi ${to.name},\n\nA reminder that ${ev.title} is tomorrow:\n${when(ev.startsAt)}\n${ev.venueName}, ${ev.venueAddress}, ${ev.city}\n\nYour seats: ${seats.join('; ')}\n\nYour QR tickets are in your confirmation email and in the app.`,
+    text: `Hi ${to.name},\n\nA reminder that ${ev.title} is tomorrow:\n${when(ev.startsAt, ev.timezone)}\n${ev.venueName}, ${ev.venueAddress}, ${ev.city}\n\nYour seats: ${seats.join('; ')}\n\nYour QR tickets are in your confirmation email and in the app.`,
     html: layout({
       title: `${ev.title} is tomorrow`,
-      preview: `See you there: ${when(ev.startsAt)}.`,
+      preview: `See you there: ${when(ev.startsAt, ev.timezone)}.`,
       body: `<p style="margin:0">Hi ${escape(to.name)}, a reminder that your event is tomorrow.</p>
 ${eventDetails(ev)}
 <p style="margin:20px 0 0"><span style="${LABEL}">Your seats</span><br><strong>${seats.map(escape).join('<br>')}</strong></p>

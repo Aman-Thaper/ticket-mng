@@ -1,5 +1,22 @@
 import { z } from 'zod';
 
+/** An IANA time zone name the runtime knows, e.g. Europe/London or America/Toronto. */
+export const TimeZone = z
+  .string()
+  .min(1)
+  .max(64)
+  .refine(
+    (tz) => {
+      try {
+        new Intl.DateTimeFormat('en', { timeZone: tz });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    { message: 'Unknown time zone: use an IANA name such as Europe/London' },
+  );
+
 export const ErrorResponse = z
   .object({
     error: z.object({

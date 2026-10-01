@@ -76,6 +76,8 @@ erDiagram
 
 Not drawn: `password_reset_tokens`, `notifications` (the sent-email log), `outbox`, `webhook_events`, `idempotency_keys`.
 
+**Times and time zones.** Event times are stored as UTC instants (`timestamptz`). Each venue has an IANA time zone, and pages and emails show times in it, so a 7:30 PM show in Toronto reads 7:30 PM for every viewer, like a printed ticket. Converting the other way, Postgres does it: `'2026-10-05 19:30'::timestamp AT TIME ZONE 'America/Toronto'` is the instant the seed stores.
+
 **Venue layout vs event inventory.** `venue_seats` is the physical template, written once. `event_seats` is one row per sellable seat _per event_, with its own price, status and version. All booking traffic touches `event_seats`, never the template.
 
 The database enforces the rules itself, so no code path (or future bug) can break them:
@@ -128,7 +130,7 @@ sequenceDiagram
   B->>A: POST /events/:id/bookings (before confirming: 403 EMAIL_NOT_VERIFIED)
 ```
 
-The pages (`/login`, `/signup`, `/forgot-password`, `/reset-password`, `/verify-email`, and the seat map at `/`) share `public/session.js`: the access token lives in memory only, the httpOnly refresh cookie renews it, and `?next=` brings the visitor back where they were (same-site paths only, so it can't be abused as an open redirect).
+The pages (the catalog at `/`, `/events/:id`, `/my-tickets`, and `/login`, `/signup`, `/forgot-password`, `/reset-password`, `/verify-email`) share `public/session.js` and `public/header.js`: the access token lives in memory only, the httpOnly refresh cookie renews it, and `?next=` brings the visitor back where they were (same-site paths only, so it can't be abused as an open redirect).
 
 ## Holding seats
 

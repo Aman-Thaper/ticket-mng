@@ -21,6 +21,30 @@ describe('venues', () => {
     ]);
   });
 
+  it('stores the time zone that event times are shown in (UTC unless given), and rejects unknown ones', async () => {
+    expect((await createVenue(t.app, organizer)).timezone).toBe('UTC');
+    const toronto = await createVenue(t.app, organizer, { city: 'Toronto', timezone: 'America/Toronto' });
+    expect(toronto.timezone).toBe('America/Toronto');
+
+    const res = await t.app.inject({
+      method: 'POST',
+      url: '/api/v1/venues',
+      headers: organizer.auth,
+      payload: {
+        name: 'Nowhere Hall',
+        address: '1 Main St',
+        city: 'Atlantis',
+        country: 'US',
+        timezone: 'Mars/Olympus_Mons',
+        sections: [{ name: 'Floor', rows: 1, seatsPerRow: 1 }],
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.details).toEqual([
+      expect.objectContaining({ path: 'body.timezone', message: expect.stringContaining('IANA') }),
+    ]);
+  });
+
   it('only lets organizers and admins create venues', async () => {
     const attendee = await createUser('attendee');
     await expect(createVenue(t.app, attendee)).rejects.toThrow(/FORBIDDEN/);

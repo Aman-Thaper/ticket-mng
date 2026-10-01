@@ -118,7 +118,7 @@ export async function createVenue(
     },
   });
   if (res.statusCode !== 201) throw new Error(res.body);
-  return res.json<{ id: string; capacity: number }>();
+  return res.json<{ id: string; capacity: number; timezone: string }>();
 }
 
 export function createEvent(
