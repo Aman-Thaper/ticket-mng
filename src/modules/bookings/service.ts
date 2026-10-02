@@ -7,6 +7,7 @@ import { holdAttempts } from '../../lib/metrics.js';
 import { enqueue } from '../../jobs/outbox.js';
 import { issueTickets, voidTickets } from '../tickets/service.js';
 import { notifySeatChanges, type SeatChange } from '../../realtime/seat-updates.js';
+import { pickBestSeats } from './best-seats.js';
 import { claimSeats } from './claims.js';
 
 /*
@@ -405,6 +406,73 @@ export async function holdSeats(
   } finally {
     await claim?.release();
   }
+}
+
+export interface BestSeatsRequest {
+  userId: string;
+  eventId: string;
+  quantity: number;
+  maxPriceCents?: number;
+}
+
+/**
+ * "Best available": pick the best block of adjacent free seats (best-seats.ts) and hold it,
+ * with the normal hold and all its guarantees. A competing buyer can still take the block
+ * first (the hold then fails with SEATS_UNAVAILABLE), so each attempt re-reads the seats,
+ * fresh rather than from the 1-second seat-map cache, and skips blocks that just failed:
+ * their buyer may not have committed yet, so the seats can still look free.
+ */
+export async function holdBestSeats(req: BestSeatsRequest, opts: BookingOptions) {
+  // Event checks first (not found, not on sale yet, ticket limit) so they keep their own errors.
+  await loadSaleableEvent(req.eventId, req.quantity);
+
+  const contested = new Set<number>();
+  let found = false;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const seats = (await seatsForPicking(req.eventId)).map((s) =>
+      contested.has(s.id) ? { ...s, available: false } : s,
+    );
+    const [seatIds] = pickBestSeats(seats, {
+      quantity: req.quantity,
+      maxPriceCents: req.maxPriceCents,
+      limit: 1,
+    });
+    if (!seatIds) break;
+    found = true;
+    try {
+      return await holdSeats({ userId: req.userId, eventId: req.eventId, seatIds }, opts);
+    } catch (err) {
+      if (!(err instanceof AppError && err.code === 'SEATS_UNAVAILABLE')) throw err;
+      for (const id of seatIds) contested.add(id);
+    }
+  }
+  const priced = req.maxPriceCents !== undefined;
+  throw conflict(
+    'NO_SEATS_TOGETHER',
+    found
+      ? 'Other buyers just took the best seats. Try again.'
+      : `There are no ${req.quantity} seats together${priced ? ' in your price range' : ''}. Try fewer seats${priced ? ' or a higher price' : ''}.`,
+    { quantity: req.quantity },
+  );
+}
+
+function seatsForPicking(eventId: string) {
+  return db
+    .selectFrom('eventSeats as es')
+    .innerJoin('venueSeats as vs', 'vs.id', 'es.venueSeatId')
+    .innerJoin('venueSections as sec', 'sec.id', 'vs.sectionId')
+    .leftJoin('bookings as b', 'b.id', 'es.bookingId')
+    .where('es.eventId', '=', eventId)
+    .select([
+      'es.id',
+      'es.priceCents',
+      'vs.x',
+      'vs.y',
+      'sec.name as section',
+      'sec.sortOrder as sectionOrder',
+      acquirableSql.as('available'),
+    ])
+    .execute();
 }
 
 // ─── lifecycle transitions ───────────────────────────────────────────────────────────────

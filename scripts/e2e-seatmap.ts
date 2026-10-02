@@ -169,6 +169,14 @@ try {
     await picks.nth(0).getAttribute('data-id'),
     await picks.nth(1).getAttribute('data-id'),
   ] as string[];
+
+  // Seat 2 of an empty row alone would leave seat 1 stranded: the page says so.
+  await buyer.locator(`rect[data-id="${ids[1]}"]`).click();
+  await buyer.locator('#message', { hasText: 'on its own' }).waitFor();
+  await buyer.locator(`rect[data-id="${ids[1]}"]`).click();
+  await buyer.locator('#message', { hasText: /^$/ }).waitFor();
+  step('picking seat 2 of a free row warns that seat 1 would be left on its own');
+
   await buyer.locator(`rect[data-id="${ids[0]}"]`).click();
   await buyer.locator(`rect[data-id="${ids[1]}"]`).click();
   await buyer.locator('#hold-button').click();
@@ -210,6 +218,15 @@ try {
   );
   step(`watcher saw seat ${ids[0]} become "booked" live`);
   await watcher.screenshot({ path: '.dev/e2e-watcher-sold.png' });
+
+  // ── best available: a block of seats together, in one click ──
+  await openMap(buyer);
+  await buyer.selectOption('#best-quantity', '2');
+  await buyer.locator('#best-button').click();
+  await buyer.locator('#message', { hasText: 'seats together' }).waitFor();
+  step(`best available: "${await buyer.locator('#message').textContent()}"`);
+  await buyer.locator('#cancel-button').click();
+  await buyer.locator('#booking').waitFor({ state: 'hidden' });
 
   // ── My tickets: the booking, with its QR codes ──
   await buyer.goto(`${BASE}/my-tickets`);

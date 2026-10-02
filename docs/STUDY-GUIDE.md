@@ -134,6 +134,16 @@ Two transactions both `SELECT` the seat and see `available` (neither has written
 `FOR UPDATE` queues waiters behind the lock: correct, but under a stampede everyone holds a connection while waiting. `SKIP LOCKED` lets losers fail instantly: ideal when "someone else is taking it" means "you lost". Optimistic versioning takes no locks and detects conflicts at write time: best when conflicts are rare, wasteful when they're the norm.
 </details>
 
+<details><summary>"Best available" picks a block, then holds it. What if another buyer takes it in between?</summary>
+
+The hold fails with `SEATS_UNAVAILABLE`, exactly as for any other buyer, so correctness never depends on the pick. `holdBestSeats` then re-reads the seats and tries the next best block, skipping the contested one (its buyer may not have committed yet, so those seats can still look free). Four attempts, then 409: under a rush, failing fast beats looping.
+</details>
+
+<details><summary>Why does best available avoid leaving a single empty seat?</summary>
+
+Almost nobody books one seat between strangers, so a stranded seat usually goes unsold: lost revenue, and a gap in the crowd. Within a section the algorithm prefers blocks that leave 0 or 2+ free seats beside them. It never moves you to a worse section to achieve that, because a downgrade costs the buyer more than a lone seat costs the venue. Picking by hand only warns. See `pickBestSeats`.
+</details>
+
 <details><summary>How do you prevent deadlocks between holding, paying, cancelling and expiring?</summary>
 
 Every code path locks rows in the same global order: seats (ascending id), then the booking, then the payment. Deadlocks need a cycle, and a single order makes cycles impossible. The transaction helper still retries a deadlock (40P01) if one happens, and maps it to a 503 if retries run out.

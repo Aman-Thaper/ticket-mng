@@ -164,6 +164,7 @@ sequenceDiagram
 - **`SKIP LOCKED`** makes losers fail fast (409) instead of queueing behind the winner's lock, which keeps connections free during a rush.
 - **Lazy expiry.** A seat held by a lapsed booking counts as free the moment `expires_at` passes, judged by the database clock (`acquirableSql`). The expiry job only tidies up and notifies live clients; correctness never waits for it.
 - **Lock order** is the same everywhere: seat rows (ascending id), then the booking, then the payment. No cycles, so no deadlocks between holding, paying, cancelling and expiring.
+- **Best available** (`POST /events/:id/bookings/best`, `src/modules/bookings/best-seats.ts`) is a pure ranking over the seat grid: runs of adjacent free seats in each row; front section first; within a section, never strand a lone empty seat; then the row nearest the stage and the middle of the row. The chosen block goes through the same hold. If a competing buyer wins it, the next attempt re-reads the seats and skips that block, up to four times.
 - Four strategies are implemented (`naive`, `optimistic`, `serializable`, `pessimistic`) so they can be compared: `npm run race`. See [ADR 0003](adr/0003-seat-locking.md).
 
 ## Paying

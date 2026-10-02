@@ -39,6 +39,7 @@ const EVENT_ID = /^\/events\/([0-9a-f-]{36})\/?$/i.exec(location.pathname)?.[1] 
 
 const state = {
   event: null,
+  strandWarning: false,
   /** seat id → { seat, section, label, status, version, el } */
   seats: new Map(),
   selected: new Set(),
@@ -198,6 +199,25 @@ function renderEventHeader(ev) {
       : `${money(ev.priceRange.minCents, ev.currency)} – ${money(ev.priceRange.maxCents, ev.currency)}`
     : 'Tickets not on sale';
   $('event-description').textContent = ev.description ?? '';
+
+  const most = Math.min(8, ev.maxTicketsPerUser ?? 8);
+  $('best-quantity').replaceChildren(
+    ...Array.from(
+      { length: most },
+      (_, i) => new Option(`${i + 1} seat${i ? 's' : ''}`, String(i + 1), i === 1, i === 1),
+    ),
+  );
+}
+
+/** Price choices for "Best available": one per price on the map, cheapest first. */
+function fillPriceChoices(map) {
+  const prices = [...new Set(map.sections.flatMap((s) => s.seats.map((seat) => seat.priceCents)))].sort(
+    (a, b) => a - b,
+  );
+  $('best-price').replaceChildren(
+    new Option('Any price', ''),
+    ...prices.slice(0, -1).map((p) => new Option(`Up to ${money(p, map.currency)}`, String(p))),
+  );
 }
 
 function showNotFound(detail) {
@@ -256,8 +276,10 @@ function connectLive(eventId) {
 async function loadSnapshot(eventId, subscribedAt) {
   const map = await api(`/events/${eventId}/seats`);
   if (state.event?.id !== eventId) return;
-  if (!state.seats.size) renderMap(map);
-  else mergeSnapshot(map);
+  if (!state.seats.size) {
+    renderMap(map);
+    fillPriceChoices(map);
+  } else mergeSnapshot(map);
   state.snapshotReady = true;
   applyUpdates(state.buffered.splice(0));
   restorePendingSelection(eventId);
@@ -393,6 +415,41 @@ function toggleSeat(id) {
   }
   paint(id);
   updateCheckout();
+  warnIfStranding();
+}
+
+/**
+ * Picking seats by hand can leave one free seat squeezed between yours and a taken seat or
+ * the end of the row. Nobody books a lone seat, so box offices discourage it; so do we (as a
+ * hint, not a rule). "Best available" never does it.
+ */
+function warnIfStranding() {
+  const rows = new Map();
+  for (const entry of state.seats.values()) {
+    const key = `${entry.section}|${entry.seat.y}`;
+    if (!rows.has(key)) rows.set(key, new Map());
+    rows.get(key).set(entry.seat.x, entry);
+  }
+  const taken = (e) => !e || e.status !== 'available' || state.selected.has(e.seat.id);
+  const stranded = new Set();
+  for (const id of state.selected) {
+    const entry = state.seats.get(id);
+    const row = rows.get(`${entry.section}|${entry.seat.y}`);
+    for (const dx of [-1, 1]) {
+      const neighbour = row.get(entry.seat.x + dx);
+      if (neighbour && !taken(neighbour) && taken(row.get(entry.seat.x + 2 * dx))) stranded.add(neighbour);
+    }
+  }
+  if (stranded.size) {
+    const names = [...stranded].map((e) => `${e.section} ${e.seat.row}${e.seat.number}`).join(' and ');
+    showMessage(
+      `Heads up: this leaves ${names} on its own. Single seats rarely sell; could you shift over one?`,
+    );
+    state.strandWarning = true;
+  } else if (state.strandWarning) {
+    showMessage('');
+    state.strandWarning = false;
+  }
 }
 
 $('seat-map').addEventListener('click', (e) => {
@@ -430,15 +487,20 @@ function updateCheckout() {
   $('selection-total').textContent = state.selected.size ? `Total ${money(total, state.event.currency)}` : '';
   const user = session.user;
   const hold = $('hold-button');
+  const best = $('best-button');
   if (!user) {
     hold.disabled = !state.selected.size;
     hold.textContent = 'Log in to book';
+    best.disabled = false;
+    best.textContent = 'Log in to find seats';
   } else if (!user.emailVerified) {
-    hold.disabled = true;
-    hold.textContent = 'Confirm your email to book';
+    hold.disabled = best.disabled = true;
+    hold.textContent = best.textContent = 'Confirm your email to book';
   } else {
     hold.disabled = !state.selected.size || Boolean(state.booking);
     hold.textContent = `Hold ${state.selected.size || ''} seat${state.selected.size === 1 ? '' : 's'}`;
+    best.disabled = Boolean(state.booking);
+    best.textContent = 'Find the best seats';
   }
 }
 
@@ -479,6 +541,42 @@ $('hold-button').addEventListener('click', async () => {
     showMessage(describeError(err));
     if (err.code === 'SEATS_UNAVAILABLE')
       for (const id of err.details?.seatIds ?? []) state.selected.delete(id);
+    if (err.code === 'EMAIL_NOT_VERIFIED') await reloadUser().catch(() => {});
+  } finally {
+    repaintAll();
+    updateCheckout();
+  }
+});
+
+$('best-button').addEventListener('click', async () => {
+  if (!session.user) {
+    location.assign(withNext('/login', `/events/${state.event.id}`));
+    return;
+  }
+  const quantity = Number($('best-quantity').value);
+  const maxPriceCents = $('best-price').value ? Number($('best-price').value) : undefined;
+  const idempotencyKey = crypto.randomUUID(); // reused by network retries, like holds
+  $('best-button').disabled = true;
+  try {
+    const booking = await withNetworkRetry(() =>
+      api(`/events/${state.event.id}/bookings/best`, {
+        method: 'POST',
+        body: { quantity, ...(maxPriceCents ? { maxPriceCents } : {}) },
+        headers: { 'idempotency-key': idempotencyKey },
+      }),
+    );
+    state.selected.clear();
+    showBooking(booking);
+    const where = `${booking.items[0].section}, row ${booking.items[0].row}`;
+    const numbers = booking.items.map((i) => i.number).sort((a, b) => a - b);
+    const seats = numbers.length > 1 ? `seats ${numbers[0]}–${numbers.at(-1)}` : `seat ${numbers[0]}`;
+    log(`best available: held ${where}, ${seats}`);
+    showMessage(
+      `Got ${numbers.length} seat${numbers.length > 1 ? 's' : ''} together: ${where}, ${seats}. Pay before the timer runs out.`,
+      true,
+    );
+  } catch (err) {
+    showMessage(describeError(err));
     if (err.code === 'EMAIL_NOT_VERIFIED') await reloadUser().catch(() => {});
   } finally {
     repaintAll();

@@ -54,6 +54,24 @@
       </section>
 
       <aside class="panel checkout" aria-labelledby="checkout-title">
+        <section class="best" aria-labelledby="best-title">
+          <h2 id="best-title">Best available</h2>
+          <div class="best-options">
+            <label>
+              <span class="muted">Seats</span>
+              <select id="best-quantity" aria-label="Number of seats"></select>
+            </label>
+            <label>
+              <span class="muted">Price</span>
+              <select id="best-price" aria-label="Highest price per seat">
+                <option value="">Any price</option>
+              </select>
+            </label>
+          </div>
+          <button id="best-button" type="button">Find the best seats</button>
+          <p class="or muted">or pick your own seats on the map</p>
+        </section>
+
         <h2 id="checkout-title">Your seats</h2>
         <ul id="selection" class="selection"></ul>
         <p id="selection-total" class="total"></p>

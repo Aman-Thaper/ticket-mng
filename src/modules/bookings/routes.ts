@@ -8,7 +8,7 @@ import { assertEmailVerified } from '../auth/verification.js';
 import { ErrorResponse, errors, IdParams, Limit } from '../../lib/schemas.js';
 import { bearerAuth, currentUser, requireAuth } from '../auth/guard.js';
 import { assertBookingOwner, BookingDto, getBookingFor, listBookingsFor } from './queries.js';
-import { cancelPendingBooking, holdSeats, type BookingOptions } from './service.js';
+import { cancelPendingBooking, holdBestSeats, holdSeats, type BookingOptions } from './service.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -54,6 +54,43 @@ export const bookingRoutes: FastifyPluginAsyncZod = async (app) => {
       return withIdempotency(req, reply, user.id, async () => {
         const { bookingId } = await holdSeats(
           { userId: user.id, eventId: req.params.id, seatIds: req.body.seatIds },
+          app.bookingOptions,
+        );
+        reply.header('location', `/api/v1/bookings/${bookingId}`);
+        return { statusCode: 201, body: await getBookingFor(user, bookingId) };
+      });
+    },
+  );
+
+  app.post(
+    '/events/:id/bookings/best',
+    {
+      onRequest: requireAuth,
+      schema: {
+        tags: ['bookings'],
+        summary: 'Hold the best available block of adjacent seats',
+        description:
+          'Picks the best block of `quantity` adjacent free seats (front section, then the row nearest the stage, then the middle of the row), ' +
+          'never stranding a single empty seat beside it, and holds it like POST /events/:id/bookings. If a competing buyer takes the block first, the next one is tried. ' +
+          'Fails with 409 NO_SEATS_TOGETHER when no block fits. Supports `Idempotency-Key`.',
+        security: bearerAuth,
+        params: IdParams,
+        headers: z.object({ 'idempotency-key': z.string().optional() }),
+        body: z.object({
+          quantity: z.int().min(1).max(50),
+          maxPriceCents: z.int().positive().optional().describe('Only seats at or below this price'),
+        }),
+        response: { 201: BookingDto, ...errors, 429: ErrorResponse },
+      },
+    },
+    async (req, reply) => {
+      const user = currentUser(req);
+      await enforce(req, reply, [[HOLD_LIMIT, user.id]]);
+      await assertEmailVerified(user.id);
+
+      return withIdempotency(req, reply, user.id, async () => {
+        const { bookingId } = await holdBestSeats(
+          { userId: user.id, eventId: req.params.id, ...req.body },
           app.bookingOptions,
         );
         reply.header('location', `/api/v1/bookings/${bookingId}`);
