@@ -12,10 +12,13 @@ import { acquirableSql, cancelPendingBookingsForEvent } from '../bookings/servic
 import { bumpGenerations, generationKey, invalidate, MicroCache, readThrough } from '../../lib/cache.js';
 import { sendCachedJson } from '../../lib/http-cache.js';
 import { stableStringify } from '../../lib/json.js';
+import { logger } from '../../lib/logger.js';
 import { decodeCursor, encodeCursor } from '../../lib/pagination.js';
 import { errors, IdParams } from '../../lib/schemas.js';
+import { mostViewed } from '../../realtime/viewers.js';
 import { bearerAuth, currentUser, optionalAuth, requireRole, type AuthUser } from '../auth/guard.js';
 import { assertCanManage, isVisible } from './access.js';
+import { liveStats, soldLastHour } from './live.js';
 import { posterDto, type EventDto } from './schemas.js';
 import {
   CreateEventBody,
@@ -24,6 +27,8 @@ import {
   ListEventsQuery,
   SeatMapResponse,
   STATUS_TRANSITIONS,
+  TrendingQuery,
+  TrendingResponse,
   UpdateEventBody,
 } from './schemas.js';
 
@@ -79,11 +84,12 @@ const toEventDto = (r: EventRow): z.infer<typeof EventDto> => ({
 // ─── read side: caching (see lib/cache.ts for the two strategies) ─────────────────────────
 
 type EventDetail = z.infer<typeof EventDetailDto>;
-type StaticEvent = Omit<EventDetail, 'seats'>;
+type StaticEvent = Omit<EventDetail, 'seats' | 'live'>;
 
 /**
- * Everything about an event except live availability: cached in Redis, and invalidated
- * through the event's generation counter whenever the event is written.
+ * Everything about an event except the live numbers (availability, viewers, recent sales):
+ * cached in Redis, and invalidated through the event's generation counter whenever the event
+ * is written.
  */
 async function loadStaticEvent(id: string): Promise<StaticEvent | null> {
   const { body } = await readThrough('event', `event:${id}`, [generationKey.event(id)], 300, async () => {
@@ -129,7 +135,8 @@ async function getEventDetail(id: string, viewer: AuthUser | null): Promise<Even
   const event = await loadStaticEvent(id);
   // The visibility check runs on every request, cache hit or not.
   if (!event || !isVisible(event, viewer)) throw notFound('Event');
-  return { ...event, seats: await availability(id) };
+  const [seats, live] = await Promise.all([availability(id), liveStats(id)]);
+  return { ...event, seats, live };
 }
 
 /** Seat maps are the hottest read of an on-sale: in-process, 1 s, single-flight. */
@@ -234,6 +241,15 @@ async function seatStats(eventIds: string[]) {
   return new Map(rows.map((r) => [r.eventId, r]));
 }
 
+type SeatStats = { total: number; available: number; minCents: number; maxCents: number };
+
+/** An event as it appears in lists: the event, approximate seat counts and its price range. */
+const toListItem = (r: EventRow, s: SeatStats | undefined) => ({
+  ...toEventDto(r),
+  seats: { total: s?.total ?? 0, available: s?.available ?? 0 },
+  priceRange: s ? { minCents: s.minCents, maxCents: s.maxCents } : null,
+});
+
 async function listEvents({
   q,
   city,
@@ -280,17 +296,50 @@ async function listEvents({
   const last = page.at(-1);
   const stats = await seatStats(page.map((r) => r.id));
   return {
-    data: page.map((r) => {
-      const s = stats.get(r.id);
-      return {
-        ...toEventDto(r),
-        seats: { total: s?.total ?? 0, available: s?.available ?? 0 },
-        priceRange: s ? { minCents: s.minCents, maxCents: s.maxCents } : null,
-      };
-    }),
+    data: page.map((r) => toListItem(r, stats.get(r.id))),
     page: { limit, nextCursor: hasMore && last ? encodeCursor({ at: last.startsAt, id: last.id }) : null },
   };
 }
+
+/**
+ * "Trending now": upcoming events with the most people viewing them right now (see
+ * realtime/viewers.ts), ties broken by tickets sold in the last hour. Redis says which
+ * events are being watched; Postgres fills in the cards.
+ */
+async function trending(limit: number): Promise<z.infer<typeof TrendingResponse>> {
+  let watched: Awaited<ReturnType<typeof mostViewed>>;
+  try {
+    // Over-fetch: some watched events may have ended or been cancelled since.
+    watched = await mostViewed(limit * 3);
+  } catch (err) {
+    logger.warn({ err }, 'viewer counts unavailable; no trending events');
+    return { data: [] };
+  }
+  if (!watched.length) return { data: [] };
+  const ids = watched.map((w) => w.eventId);
+  const [rows, stats, sold] = await Promise.all([
+    selectEvents(db)
+      .where('e.id', 'in', ids)
+      .where('e.status', '=', 'published')
+      .where('e.startsAt', '>=', new Date())
+      .execute(),
+    seatStats(ids),
+    soldLastHour(ids),
+  ]);
+  const viewers = new Map(watched.map((w) => [w.eventId, w.viewers]));
+  return {
+    data: rows
+      .map((r) => ({
+        ...toListItem(r, stats.get(r.id)),
+        live: { viewers: viewers.get(r.id) ?? 0, soldLastHour: sold.get(r.id) ?? 0 },
+      }))
+      .sort((a, b) => b.live.viewers - a.live.viewers || b.live.soldLastHour - a.live.soldLastHour)
+      .slice(0, limit),
+  };
+}
+
+/** The same list for everyone, and it moves every few seconds: micro-cached, like seat maps. */
+const trendingCache = new MicroCache('trending', config.MICRO_CACHE_TTL_MS, 20);
 
 export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post(
@@ -416,12 +465,34 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
   );
 
   app.get(
+    '/events/trending',
+    {
+      schema: {
+        tags: ['events'],
+        summary: 'Events people are viewing right now, most viewers first',
+        description:
+          'Upcoming published events with their live viewer counts and tickets sold in the last hour. ' +
+          'Empty when nobody is viewing anything.',
+        querystring: TrendingQuery,
+        response: { 200: TrendingResponse, ...errors },
+      },
+    },
+    async (req, reply) => {
+      const { limit } = req.query;
+      const cached = await trendingCache.get(String(limit), async () =>
+        JSON.stringify(await trending(limit)),
+      );
+      return sendCachedJson(req, reply, cached, 'public, max-age=5');
+    },
+  );
+
+  app.get(
     '/events/:id',
     {
       onRequest: optionalAuth,
       schema: {
         tags: ['events'],
-        summary: 'Get an event with seat availability and price range',
+        summary: 'Get an event with seat availability, price range, and live viewers and sales',
         params: IdParams,
         response: { 200: EventDetailDto, ...errors },
       },
@@ -571,7 +642,9 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
         description:
           'Connect with a WebSocket. The server sends {"type":"hello"} once subscribed; load GET /events/:id/seats after that, ' +
           'then apply {"type":"seats","seats":[[seatId, status, version], ...]} messages, ignoring any seat update whose ' +
-          'version is not newer than what you have. Updates are batched (~100 ms). Close code 1001/1013: reconnect.',
+          'version is not newer than what you have. Updates are batched (~100 ms). ' +
+          '{"type":"viewers","count":N} reports how many people are watching the event, whenever that changes (checked every ~5 s). ' +
+          'Close code 1001/1013: reconnect.',
         params: IdParams,
       },
     },
@@ -586,6 +659,11 @@ export const eventRoutes: FastifyPluginAsyncZod = async (app) => {
         socket.send(
           JSON.stringify({ type: 'hello', eventId: event.id, serverTime: new Date().toISOString() }),
         );
+        // Other viewers hear about a change at the next report; a newcomer gets the count now.
+        const viewers = app.liveHub.lastViewerCount(event.id);
+        if (viewers !== undefined) {
+          socket.send(JSON.stringify({ type: 'viewers', eventId: event.id, count: viewers }));
+        }
       }
     },
   );

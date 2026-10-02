@@ -329,7 +329,9 @@ button:disabled {
 
 @media (max-width: 900px) {
   .layout {
-    grid-template-columns: 1fr;
+    /* minmax(0, …): a plain 1fr can't shrink below the seat map's width, so on a phone the
+       whole page would scroll sideways instead of the map scrolling inside its box. */
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

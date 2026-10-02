@@ -22,6 +22,7 @@
     "loadtest:setup": "tsx scripts/loadtest/setup.ts",
     "loadtest": "k6 run scripts/loadtest/flash-sale.js",
     "e2e": "tsx scripts/e2e-seatmap.ts",
+    "demo:crowd": "tsx scripts/demo-crowd.ts",
     "build": "tsc -p tsconfig.build.json",
     "migrate:prod": "node dist/db/migrate.js latest",
     "dev:pretty": "LOG_PRETTY=true tsx watch src/server.ts"

@@ -71,9 +71,23 @@ export const EventDto = z
   })
   .meta({ id: 'Event' });
 
+export const LiveStatsDto = z
+  .object({
+    viewers: z
+      .int()
+      .nullable()
+      .describe(
+        'People with the live seat map open right now, across all servers (refreshed every ~5 s; ' +
+          'null if the count is unavailable). Live updates: {"type":"viewers"} on GET /events/:id/live.',
+      ),
+    soldLastHour: z.int().describe('Tickets sold in the last hour'),
+  })
+  .meta({ id: 'LiveStats' });
+
 export const EventDetailDto = EventDto.extend({
   seats: z.object({ total: z.int(), available: z.int() }),
   priceRange: z.object({ minCents: z.int(), maxCents: z.int() }).nullable(),
+  live: LiveStatsDto,
 }).meta({ id: 'EventDetail' });
 
 const endsAfterStart = (b: { startsAt?: string; endsAt?: string }) =>
@@ -186,3 +200,16 @@ export const SeatMapResponse = z
     ),
   })
   .meta({ id: 'SeatMap' });
+
+export const TrendingQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(20).default(8),
+});
+
+export const TrendingResponse = z.object({
+  data: z.array(
+    EventListItem.extend({ live: LiveStatsDto }).meta({
+      id: 'TrendingEvent',
+      description: 'An upcoming, published event that people are viewing right now',
+    }),
+  ),
+});

@@ -115,3 +115,22 @@ export function priceText(range, currency) {
     ? money(range.minCents, currency)
     : `From ${money(range.minCents, currency)}`;
 }
+
+const counts = new Intl.NumberFormat();
+const compactCounts = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
+
+/** "1,240" */
+export const count = (n) => counts.format(n);
+/** "1.2K" */
+export const compactCount = (n) => compactCounts.format(n);
+
+/**
+ * "1,240 viewing now · 86 sold in the last hour", from an event's live numbers, or '' when
+ * there's nothing worth saying. One viewer is just you, so viewers start counting at two.
+ */
+export function liveText(live) {
+  const parts = [];
+  if (live?.viewers >= 2) parts.push(`${count(live.viewers)} viewing now`);
+  if (live?.soldLastHour > 0) parts.push(`${count(live.soldLastHour)} sold in the last hour`);
+  return parts.join(' · ');
+}

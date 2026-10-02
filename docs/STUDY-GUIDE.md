@@ -246,25 +246,42 @@ It makes a retried request return the original response, even if the first attem
 **Read, in order:**
 
 1. `src/realtime/seat-updates.ts` and `src/realtime/hub.ts`: publish after commit, per-replica fan-out, batching, backpressure.
-2. `public/app.js`: subscribe first, snapshot second, versions; reconnection with backoff.
+2. `public/event.js`: subscribe first, snapshot second, versions; reconnection with backoff.
+   Then `src/realtime/viewers.ts`: "N viewing now" summed across replicas, with per-field expiry.
 3. `src/lib/cache.ts`: `MicroCache` (single-flight) and `readThrough` with generations.
 4. `src/lib/rate-limit.ts`: a token bucket in a Lua script.
 5. `src/db/index.ts` and `src/lib/errors.ts`: pool limits, timeouts, 503 + Retry-After.
 6. `deploy/nginx/local.conf`: `least_conn`, and the comment about `proxy_next_upstream`.
 7. `scripts/loadtest/flash-sale.js`, and the load test section of the README.
-8. [ADR 0007](adr/0007-live-seat-updates.md), [ADR 0008](adr/0008-caching.md), [ADR 0009](adr/0009-overload.md).
+8. [ADR 0007](adr/0007-live-seat-updates.md), [ADR 0008](adr/0008-caching.md), [ADR 0009](adr/0009-overload.md), [ADR 0013](adr/0013-viewer-counts.md).
 
 **Try:**
 
 - `scripts/cluster.sh loadtest` (the cluster with the per-IP limit lifted), `npm run loadtest:setup`, then `RATE=300 npm run loadtest`, then `npm run check:invariants`.
 - Put `http_503` back into `proxy_next_upstream` in `deploy/nginx/local.conf`, rerun at a high rate, and watch the 502s appear. That's the cascading failure from the README.
 - Open the seat map in two windows and kill the API instance one of them is connected to.
+- `npm run demo:crowd`, then open the catalog and the top event. With the cluster running, `kill -9` one API instance: the viewer count drops by its share within 15 s, and nothing cleaned up after it. Watch it happen with `redis-cli HGETALL viewers:<event id>` and `redis-cli HTTL viewers:<event id> FIELDS 1 <field>`.
 
 **Questions:**
 
 <details><summary>Why publish seat changes after commit, and why do clients need versions?</summary>
 
 Publishing before commit could announce a change that then rolls back. Versions let clients discard updates older than what they already have, so the snapshot/update race, duplicates and reordering can't show a wrong seat.
+</details>
+
+<details><summary>How does "1,240 viewing now" add up across replicas, and why doesn't a crashed replica's count stay forever?</summary>
+
+Every 5 s each replica writes its own count into one hash field per event (`viewers:<event>`, field = the replica), and readers sum the fields. Each field has its own expiry (`HSETEX … PX 15000`), refreshed by every report. A replica that crashes stops refreshing, so its fields expire on their own within 15 s. No other replica has to notice or clean up.
+</details>
+
+<details><summary>Why not INCR when a viewer connects and DECR when they leave?</summary>
+
+A replica that crashes never sends its DECRs, so the total drifts upward and stays wrong. Fixing that means tracking which replica contributed what, which is the hash design anyway. INCR/DECR also costs a Redis write per connect and disconnect, the busiest path during an on-sale; periodic reports cost the same whether 10 or 10,000 people joined in the last 5 s.
+</details>
+
+<details><summary>"Sold in the last hour" moves the moment a seat sells, but the server only computes it on request. How?</summary>
+
+The page loads the number once (from `bookings`, using a partial index on `(event_id, confirmed_at)`), then adds one for every seat it sees turn `booked` over the WebSocket, which it receives anyway. Seat versions make that count exact, even with duplicate or reordered messages. The only drift is sales ageing past the hour while the page stays open, and a reload corrects it.
 </details>
 
 <details><summary>Why generation counters instead of deleting cache keys on write?</summary>

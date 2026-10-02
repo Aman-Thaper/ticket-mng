@@ -7,6 +7,9 @@
 //      (visitors log in first; booking needs a confirmed email, since tickets are emailed)
 //   4. pay with a test card at the fake gateway → the webhook confirms the booking
 //   5. show the QR tickets (they're emailed too, and listed under My tickets)
+//
+// The header also shows "N viewing now · M sold in the last hour": viewers arrive over the
+// same WebSocket, and every seat that turns sold on the live map counts as a sale.
 
 import {
   availabilityTag,
@@ -14,6 +17,7 @@ import {
   dateBadge,
   eventHue,
   eventIcon,
+  liveText,
   longDate,
   money,
   time,
@@ -39,6 +43,8 @@ const EVENT_ID = /^\/events\/([0-9a-f-]{36})\/?$/i.exec(location.pathname)?.[1] 
 
 const state = {
   event: null,
+  /** { viewers, soldLastHour }: from the event, then kept current by live messages */
+  live: null,
   strandWarning: false,
   /** seat id → { seat, section, label, status, version, el } */
   seats: new Map(),
@@ -144,7 +150,9 @@ async function openEvent(eventId) {
     showNotFound(err.status === 404 ? null : describeError(err));
     return false;
   }
+  state.live = { ...state.event.live };
   renderEventHeader(state.event);
+  renderLive();
   connectLive(eventId);
   return true;
 }
@@ -209,6 +217,13 @@ function renderEventHeader(ev) {
   );
 }
 
+/** "1,240 viewing now · 86 sold in the last hour" (hidden while there's nothing to say). */
+function renderLive() {
+  const text = liveText(state.live);
+  $('event-live').hidden = !text;
+  $('event-live-text').textContent = text;
+}
+
 /** Price choices for "Best available": one per price on the map, cheapest first. */
 function fillPriceChoices(map) {
   const prices = [...new Set(map.sections.flatMap((s) => s.seats.map((seat) => seat.priceCents)))].sort(
@@ -258,6 +273,9 @@ function connectLive(eventId) {
     } else if (data.type === 'seats') {
       if (state.snapshotReady) applyUpdates(data.seats);
       else state.buffered.push(...data.seats);
+    } else if (data.type === 'viewers' && state.live) {
+      state.live.viewers = data.count;
+      renderLive();
     }
   };
 
@@ -295,10 +313,12 @@ async function loadSnapshot(eventId, subscribedAt) {
 
 function applyUpdates(tuples) {
   let changed = 0;
+  let sold = 0;
   for (const [id, status, version] of tuples) {
     const entry = state.seats.get(id);
     // Versions make updates idempotent and order-proof: anything not newer is stale.
     if (!entry || version <= entry.version) continue;
+    if (status === 'booked' && entry.status !== 'booked') sold++;
     entry.status = status;
     entry.version = version;
     if (status !== 'available' && state.selected.has(id)) {
@@ -311,6 +331,10 @@ function applyUpdates(tuples) {
   if (changed) {
     updateCounts();
     updateCheckout();
+  }
+  if (sold && state.live) {
+    state.live.soldLastHour += sold;
+    renderLive();
   }
 }
 

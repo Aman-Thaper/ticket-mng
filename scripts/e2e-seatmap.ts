@@ -8,7 +8,9 @@
  * follows its link, then picks two seats, holds them, pays with a test card and gets QR
  * tickets, and the email with those QR codes must arrive at the address they signed up with.
  * Meanwhile a second browser, the "watcher", must see the seats turn held, then sold, live
- * over the WebSocket, without reloading. Screenshots go to .dev/e2e-*.png.
+ * over the WebSocket, without reloading, along with "2 sold in the last hour" and the
+ * viewer count. The catalog must then list the event under "Trending now".
+ * Screenshots go to .dev/e2e-*.png.
  * Needs the API, the worker (it sends email and confirms payments) and Mailpit.
  */
 import { parseArgs } from 'node:util';
@@ -217,6 +219,24 @@ try {
     },
   );
   step(`watcher saw seat ${ids[0]} become "booked" live`);
+
+  // ── live numbers: sales counted from the seat updates, viewers across instances ──
+  await watcher
+    .locator('#event-live-text', { hasText: '2 sold in the last hour' })
+    .waitFor({ timeout: 5_000 });
+  // The watcher and the buyer are both on the page. Each instance reports every 5 s, so with
+  // them on different instances the total can take two rounds to reach both.
+  await watcher.waitForFunction(
+    () =>
+      Number(
+        /([\d,]+) viewing now/
+          .exec(document.querySelector('#event-live-text')?.textContent ?? '')?.[1]
+          ?.replace(/,/g, ''),
+      ) >= 2,
+    undefined,
+    { timeout: 15_000 },
+  );
+  step(`watcher's header reads "${await watcher.locator('#event-live-text').textContent()}"`);
   await watcher.screenshot({ path: '.dev/e2e-watcher-sold.png' });
 
   // ── best available: a block of seats together, in one click ──
@@ -235,11 +255,17 @@ try {
   await booking.locator('.qr-ticket img').nth(1).waitFor();
   step(`My tickets lists the booking with its ${await booking.locator('.qr-ticket img').count()} QR codes`);
 
-  // ── the catalog: category rows, a category grid, and on to an event's seat map ──
+  // ── the catalog: trending, category rows, a category grid, and on to an event's seat map ──
   const visitor = await newPage('visitor');
   await visitor.goto(`${BASE}/`);
   await visitor.locator('.event-row .card:not(.skeleton)').first().waitFor();
-  const rows = await visitor.locator('.event-row').count();
+  // The watcher still has the test event open, so it's trending, with a viewer badge.
+  const trendingCard = visitor.locator(`.event-row.trending .card[href="/events/${event.id}"]`);
+  await trendingCard.locator('.viewers-tag').waitFor({ timeout: 5_000 });
+  step(
+    `catalog: "Trending now" lists the event with "${await trendingCard.locator('.viewers-tag').textContent()}"`,
+  );
+  const rows = (await visitor.locator('.event-row').count()) - 1;
   await visitor.locator('.chip[data-category="theatre"]').click();
   await visitor.locator('.grid .card:not(.skeleton)').first().click();
   await visitor.locator('rect.seat').first().waitFor();

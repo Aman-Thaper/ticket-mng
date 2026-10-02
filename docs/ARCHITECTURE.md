@@ -244,26 +244,43 @@ sequenceDiagram
 - **Slow clients are dropped** once 1 MiB is buffered for them, so one bad connection can't exhaust memory. Heartbeats every 30 s find dead connections; each replica caps connections at 20,000.
 - On shutdown, sockets close with code 1001 (going away); the page reconnects with exponential backoff and jitter, so a whole audience doesn't reconnect in the same instant.
 
+### Who's watching: "1,240 viewing now" and "Trending now"
+
+A viewer is an open live seat-map socket, and each replica knows only its own ([ADR 0013](adr/0013-viewer-counts.md), `src/realtime/viewers.ts`):
+
+```
+every 5 s, each replica:   HSETEX viewers:<event> PX 15000 FIELDS 1 <replica> <its count>
+                           ZADD live-events <now> <event>
+an event's viewers:        sum of HVALS viewers:<event>
+trending:                  events in live-events touched in the last 15 s, summed, sorted
+```
+
+- Each hash field expires on its own, so a crashed replica's count disappears within 15 s with nobody cleaning up; a draining replica deletes its fields at once. Redis work grows with the number of events watched, not with how fast people come and go.
+- After each report the hub reads its events' totals and sends `{type:'viewers', count}` when one changed; a newcomer gets the last count right after `hello`.
+- "Sold in the last hour" is counted in Postgres from confirmed bookings (partial index on `(event_id, confirmed_at)`), and the page adds each seat it sees turn sold, so it moves the instant a sale lands.
+- Both numbers are best effort: without Redis, `viewers` is `null` and trending is empty, and pages work as before.
+
 ## Caching
 
 | Data                                                     | Layer                                                                                                    | Invalidation                                                                                                                               |
 | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | Seat maps, availability counts (hot, change constantly)  | In-process micro-cache, 1 s TTL, single-flight: a thousand concurrent misses cost one query. ETag → 304. | None; 1 s staleness is fine because the WebSocket keeps clients current.                                                                   |
+| Live numbers (viewers, sold in the last hour), trending  | The same micro-cache, 1 s                                                                                | None; the underlying counts only move every few seconds.                                                                                   |
 | Event pages, public listings (read a lot, change rarely) | Redis read-through, keyed by **generation counters**                                                     | Every write bumps the generation after commit. A slow reader can only store stale data under an old generation that nobody reads any more. |
 
 ## When things fail
 
-| Failure                                | What happens                                                                                                                                                                                                                                                                                                                 |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| An API replica crashes                 | Nginx retries requests that never reached it on another replica; its WebSocket viewers reconnect elsewhere. Nothing is lost: no state lives in a replica.                                                                                                                                                                    |
-| Deploying a new release                | `deploy/rollout.sh` starts new replicas, moves Nginx to them, then drains the old ones: 0 failed requests under load ([DEPLOY.md](DEPLOY.md#why-a-rollout-script)).                                                                                                                                                          |
-| Database connections exhausted         | Requests wait up to 5 s for a connection, then get 503 + `Retry-After`. Nginx doesn't count those as failures, so overload never turns into "no live upstreams".                                                                                                                                                             |
-| Redis down                             | Claim gate, caches, rate limits and the session denylist fail open: requests keep working and Postgres still guarantees correctness (the cost: a just-revoked access token keeps working until it expires, at most 15 minutes). Live updates and job processing stop until Redis returns; committed jobs wait in the outbox. |
-| Worker down                            | Requests still succeed. Outbox rows accumulate (`outbox_unpublished` alerts on age) and are published when a worker returns. Lapsed holds are still free to take (lazy expiry).                                                                                                                                              |
-| Webhook lost or delayed                | The provider retries. Two delivered at once, or out of order: deduplication plus reconciliation converge on the provider's state.                                                                                                                                                                                            |
-| A job keeps failing                    | 5 attempts with backoff, then the dead-letter queue for an admin.                                                                                                                                                                                                                                                            |
-| Email provider trouble                 | Rate limits and outages: retried with backoff (the queue is also paced to the limit). A bad API key, an unverified domain or a used-up quota: dead-lettered at once with the provider's message, then retried by an admin once fixed. No email is lost.                                                                      |
-| Payment succeeds after the hold lapsed | Seats still free: the booking is confirmed anyway. Seats sold: automatic refund and an email.                                                                                                                                                                                                                                |
+| Failure                                | What happens                                                                                                                                                                                                                                                                                                                                |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| An API replica crashes                 | Nginx retries requests that never reached it on another replica; its WebSocket viewers reconnect elsewhere. Nothing is lost: no state lives in a replica.                                                                                                                                                                                   |
+| Deploying a new release                | `deploy/rollout.sh` starts new replicas, moves Nginx to them, then drains the old ones: 0 failed requests under load ([DEPLOY.md](DEPLOY.md#why-a-rollout-script)).                                                                                                                                                                         |
+| Database connections exhausted         | Requests wait up to 5 s for a connection, then get 503 + `Retry-After`. Nginx doesn't count those as failures, so overload never turns into "no live upstreams".                                                                                                                                                                            |
+| Redis down                             | Claim gate, caches, rate limits and the session denylist fail open: requests keep working and Postgres still guarantees correctness (the cost: a just-revoked access token keeps working until it expires, at most 15 minutes). Live updates, viewer counts and job processing stop until Redis returns; committed jobs wait in the outbox. |
+| Worker down                            | Requests still succeed. Outbox rows accumulate (`outbox_unpublished` alerts on age) and are published when a worker returns. Lapsed holds are still free to take (lazy expiry).                                                                                                                                                             |
+| Webhook lost or delayed                | The provider retries. Two delivered at once, or out of order: deduplication plus reconciliation converge on the provider's state.                                                                                                                                                                                                           |
+| A job keeps failing                    | 5 attempts with backoff, then the dead-letter queue for an admin.                                                                                                                                                                                                                                                                           |
+| Email provider trouble                 | Rate limits and outages: retried with backoff (the queue is also paced to the limit). A bad API key, an unverified domain or a used-up quota: dead-lettered at once with the provider's message, then retried by an admin once fixed. No email is lost.                                                                                     |
+| Payment succeeds after the hold lapsed | Seats still free: the booking is confirmed anyway. Seats sold: automatic refund and an email.                                                                                                                                                                                                                                               |
 
 ## Observability
 
@@ -284,7 +301,7 @@ src/
   modules/<area>/             routes + service per area: auth, users, venues, events,
                               bookings, payments, tickets, admin, health
   jobs/                       queues, the outbox relay, the job runner, handlers, schedules
-  realtime/                   live seat-map hub (WebSockets + Redis pub/sub)
+  realtime/                   live seat-map hub (WebSockets + Redis pub/sub), viewer counts
   fake-gateway/               a Stripe-shaped payment provider for offline development
 public/                       the seat-map page and the password-reset page
 scripts/                      seed, race test, load tests, e2e test, invariant check, cluster

@@ -1,8 +1,9 @@
 import type { WebSocket } from 'ws';
 import { gaugeFrom } from '../lib/metrics.js';
 import { createRedis } from '../lib/redis.js';
-import { logger } from '../lib/logger.js';
+import { INSTANCE_ID, logger } from '../lib/logger.js';
 import { seatChannel, type SeatTuple } from './seat-updates.js';
+import { VIEWER_REPORT_MS, ViewerCounts, viewerTotals } from './viewers.js';
 
 /** Changes arriving within this window go out as one message. */
 const FLUSH_MS = 100;
@@ -25,9 +26,14 @@ const MAX_CONNECTIONS = 20_000;
  *
  * Nothing about subscribers is shared between instances, so any instance can serve any
  * client, and a crashed instance takes nothing with it: its clients reconnect elsewhere.
+ *
+ * The hub also counts its clients per event for "N viewing now" (see viewers.ts): every
+ * VIEWER_REPORT_MS it reports its counts to Redis, reads back the totals across all
+ * instances, and sends {type:'viewers'} to an event's clients when the total has changed.
  */
 /** Every hub in this process (normally one; tests build several apps). */
 const hubs = new Set<LiveSeatHub>();
+let hubSeq = 0;
 
 gaugeFrom('websocket_connections', 'Live seat-map WebSocket connections on this instance', [], () => [
   [{}, [...hubs].reduce((sum, hub) => sum + hub.stats().connections, 0)],
@@ -43,12 +49,22 @@ export class LiveSeatHub {
   private readonly heartbeat: NodeJS.Timeout;
   private flushTimer: NodeJS.Timeout | null = null;
   private connections = 0;
+  // "#n" tells apart several hubs in one process (tests run two apps side by side).
+  private readonly viewers = new ViewerCounts(`${INSTANCE_ID}#${++hubSeq}`);
+  private readonly viewerTimer: NodeJS.Timeout;
+  private reporting: Promise<void> | null = null;
+  /** The viewer total each event's clients were last told. */
+  private readonly sentTotals = new Map<string, number>();
 
   constructor() {
     hubs.add(this);
     this.subscriber.on('message', (channel: string, message: string) => this.onMessage(channel, message));
     this.heartbeat = setInterval(() => this.ping(), HEARTBEAT_MS);
     this.heartbeat.unref();
+    this.viewerTimer = setInterval(() => {
+      this.reportViewers().catch((err: unknown) => logger.warn({ err }, 'viewer count report failed'));
+    }, VIEWER_REPORT_MS);
+    this.viewerTimer.unref();
   }
 
   /** Register a client socket for an event's updates. Resolves once the subscription is live. */
@@ -75,6 +91,38 @@ export class LiveSeatHub {
     }
     viewers.add(socket);
     return true;
+  }
+
+  /** The viewer total most recently sent to this event's clients, if any. */
+  lastViewerCount(eventId: string): number | undefined {
+    return this.sentTotals.get(eventId);
+  }
+
+  /**
+   * Report this instance's clients per event, then send each event's clients the new total
+   * across all instances, if it changed. Runs every VIEWER_REPORT_MS; tests call it directly.
+   * One report at a time: if Redis is slow, a tick that comes due joins the running report.
+   */
+  reportViewers(): Promise<void> {
+    this.reporting ??= this.report().finally(() => {
+      this.reporting = null;
+    });
+    return this.reporting;
+  }
+
+  private async report() {
+    const counts = new Map([...this.sockets].map(([eventId, sockets]) => [eventId, sockets.size]));
+    await this.viewers.report(counts);
+    const totals = await viewerTotals([...counts.keys()]);
+    for (const [eventId, total] of totals) {
+      if (this.sentTotals.get(eventId) === total) continue;
+      this.sentTotals.set(eventId, total);
+      const payload = JSON.stringify({ type: 'viewers', eventId, count: total });
+      for (const socket of this.sockets.get(eventId) ?? []) this.send(socket, payload);
+    }
+    for (const eventId of this.sentTotals.keys()) {
+      if (!this.sockets.has(eventId)) this.sentTotals.delete(eventId);
+    }
   }
 
   private async leave(eventId: string, socket: WebSocket) {
@@ -144,11 +192,18 @@ export class LiveSeatHub {
   async close(): Promise<void> {
     hubs.delete(this);
     clearInterval(this.heartbeat);
+    clearInterval(this.viewerTimer);
     if (this.flushTimer) clearTimeout(this.flushTimer);
     for (const viewers of this.sockets.values()) {
       for (const socket of viewers) socket.close(1001, 'Server shutting down'); // 1001 = going away: reconnect
     }
     this.sockets.clear();
+    // Our clients are about to be counted by the instances they reconnect to. (A report
+    // still in flight finishes first, or it could re-add counts after the withdrawal.)
+    await this.reporting?.catch(() => {});
+    await this.viewers
+      .withdraw()
+      .catch((err: unknown) => logger.warn({ err }, 'viewer count withdraw failed'));
     await this.subscriber.quit().catch(() => {});
   }
 }

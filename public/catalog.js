@@ -1,9 +1,12 @@
 // The catalog: events on sale, by category, with search. State lives in the URL
-// (?category=…&q=…), so links can be shared and the back button works.
+// (?category=…&q=…), so links can be shared and the back button works. The home page opens
+// with "Trending now" (the events most people are viewing right now), and any card whose
+// event is being watched says how many people are on it.
 import {
   availabilityTag,
   CATEGORIES,
   categoryOf,
+  compactCount,
   dateBadge,
   eventHue,
   eventIcon,
@@ -60,6 +63,19 @@ $('search-form').addEventListener('submit', (e) => {
 
 let renderId = 0; // a newer render makes older, slower ones drop their results
 
+/** Event id → people viewing it now, for the badges on cards. Refreshed on every render. */
+let viewersById = new Map();
+
+/** The events most people are viewing right now. Optional extra: on failure, just none. */
+async function loadTrending() {
+  const trending = await api('/events/trending?limit=10').then(
+    (res) => res.data,
+    () => [],
+  );
+  viewersById = new Map(trending.map((e) => [e.id, e.live.viewers]));
+  return trending;
+}
+
 async function render() {
   const { category, q } = readState();
   const id = ++renderId;
@@ -88,19 +104,29 @@ async function render() {
   }
 }
 
-/** Home: one row per category, soonest first. */
+/** Home: "Trending now" (when anyone is watching anything), then one row per category. */
 async function renderRows(id) {
   results.replaceChildren(...CATEGORIES.slice(0, 3).map((c) => rowSkeleton(c)));
-  const lists = await Promise.all(
-    CATEGORIES.map((c) =>
-      api(`/events?onSale=true&category=${c.id}&limit=12`).then(
-        (page) => page.data,
-        () => [],
+  const [trending, lists] = await Promise.all([
+    loadTrending(),
+    Promise.all(
+      CATEGORIES.map((c) =>
+        api(`/events?onSale=true&category=${c.id}&limit=12`).then(
+          (page) => page.data,
+          () => [],
+        ),
       ),
     ),
-  );
+  ]);
   if (id !== renderId) return;
-  const rows = CATEGORIES.map((c, i) => (lists[i].length ? row(c, lists[i]) : null)).filter(Boolean);
+  const rows = CATEGORIES.map((c, i) =>
+    lists[i].length
+      ? row({ title: `${c.icon} ${c.label}`, noun: c.label.toLowerCase(), category: c.id }, lists[i])
+      : null,
+  ).filter(Boolean);
+  if (rows.length && trending.length) {
+    rows.unshift(row({ title: '🔥 Trending now', noun: 'trending events', trending: true }, trending));
+  }
   results.replaceChildren(
     ...(rows.length
       ? rows
@@ -108,20 +134,21 @@ async function renderRows(id) {
   );
 }
 
-function row(category, events) {
-  const section = el('section', 'event-row');
+function row({ title, noun, category, trending = false }, events) {
+  const section = el('section', trending ? 'event-row trending' : 'event-row');
   const head = el('div', 'row-head');
-  const title = el('h2', '', `${category.icon} ${category.label}`);
+  const heading = el('h2', '', title);
+  if (trending) heading.append(el('span', 'row-subtitle', 'Most people viewing right now'));
   const actions = el('div', 'row-actions');
   const rail = el('div', 'rail');
   const scrollBy = (dir) => rail.scrollBy({ left: dir * rail.clientWidth * 0.9, behavior: 'smooth' });
   const prev = button('‹', () => scrollBy(-1), 'rail-button');
   const next = button('›', () => scrollBy(1), 'rail-button');
-  prev.setAttribute('aria-label', `Earlier ${category.label.toLowerCase()}`);
-  next.setAttribute('aria-label', `More ${category.label.toLowerCase()}`);
-  const seeAll = button('See all', () => navigate({ category: category.id }), 'see-all');
-  actions.append(seeAll, prev, next);
-  head.append(title, actions);
+  prev.setAttribute('aria-label', `Earlier ${noun}`);
+  next.setAttribute('aria-label', `More ${noun}`);
+  if (category) actions.append(button('See all', () => navigate({ category }), 'see-all'));
+  actions.append(prev, next);
+  head.append(heading, actions);
   rail.append(...events.map(card));
   section.append(head, rail);
   return section;
@@ -142,9 +169,10 @@ async function renderGrid(id, { category, q }) {
   if (category) query.set('category', category);
   if (q) query.set('q', q);
 
+  const trending = loadTrending(); // for the viewer badges; fetched alongside the first page
   const loadPage = async (cursor) => {
     if (cursor) query.set('cursor', cursor);
-    const page = await api(`/events?${query}`);
+    const [page] = await Promise.all([api(`/events?${query}`), trending]);
     if (id !== renderId) return;
     grid.querySelectorAll('.skeleton').forEach((s) => s.remove());
     grid.append(...page.data.map(card));
@@ -203,6 +231,14 @@ function card(event) {
   art.append(date, el('span', 'category-tag', category.single));
   const tag = availabilityTag(event.seats);
   if (tag) art.append(el('span', `status-tag ${tag.tone}`, tag.text));
+  const viewers = viewersById.get(event.id);
+  if (viewers) {
+    const live = el('span', 'viewers-tag');
+    const dot = el('i', 'pulse');
+    dot.setAttribute('aria-hidden', 'true');
+    live.append(dot, `${compactCount(viewers)} viewing`);
+    art.append(live);
+  }
 
   const body = el('div', 'card-body');
   body.append(
