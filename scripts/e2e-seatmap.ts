@@ -10,16 +10,20 @@
  * Meanwhile a second browser, the "watcher", must see the seats turn held, then sold, live
  * over the WebSocket, without reloading, along with "2 sold in the last hour" and the
  * viewer count. The catalog must then list the event under "Trending now". My tickets must
- * download a calendar file, and reopen with its QR codes with the network off.
+ * download a calendar file, and reopen with its QR codes with the network off. Finally the
+ * organizer works the door: scans the buyer's QR codes (photos), with a repeat caught on the
+ * device, a second door told "already used", and an offline admission that syncs later.
  * Screenshots go to .dev/e2e-*.png.
  * Needs the API, the worker (it sends email and confirms payments) and Mailpit.
  */
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
-import { chromium, type Page } from 'playwright';
+import { chromium, type Browser, type Page } from 'playwright';
 import { sql } from 'kysely';
+import sharp from 'sharp';
 import { db } from '../src/db/index.js';
 import { redis } from '../src/lib/redis.js';
+import { hashPassword } from '../src/modules/auth/passwords.js';
 import { generateSeats } from '../src/modules/venues/layout.js';
 
 const { values } = parseArgs({
@@ -29,6 +33,7 @@ const { values } = parseArgs({
   },
 });
 const BASE = values['base-url'];
+await mkdir('.dev', { recursive: true }); // screenshots, ticket images and the fake camera's video
 const MAILPIT = values['mailpit-url'];
 
 interface MailSummary {
@@ -58,10 +63,14 @@ async function waitForMail(to: string, subject: string, timeoutMs = 20_000): Pro
 
 // ─── a fresh, small event ────────────────────────────────────────────────────────────────
 const tag = `e2e-${Date.now()}`;
+// The organizer logs in at the door, so they get a real password.
+const organizerEmail = `${tag}@example.com`;
+const organizerPassword = 'e2e organizer 123';
 const organizer = await db
   .insertInto('users')
   .values({
-    email: `${tag}@example.com`,
+    email: organizerEmail,
+    passwordHash: await hashPassword(organizerPassword),
     name: 'E2E Organizer',
     role: 'organizer',
     emailVerifiedAt: new Date(),
@@ -118,16 +127,23 @@ await sql`
   FROM venue_seats vs JOIN venue_sections sec ON sec.id = vs.section_id WHERE sec.venue_id = ${venue.id}::uuid
 `.execute(db);
 
-// ─── two browsers ────────────────────────────────────────────────────────────────────────
+// ─── browsers ────────────────────────────────────────────────────────────────────────────
 const browser = await chromium.launch();
+/** Launched at the door: a browser whose camera shows a ticket (a video file stands in for it). */
+let cameraBrowser: Browser | undefined;
 const consoleErrors: string[] = [];
 /** While the test has a browser offline on purpose, its failed requests are expected. */
 let offlineOnPurpose = false;
-const newPage = async (name: string) => {
-  const page = await (await browser.newContext({ viewport: { width: 1280, height: 900 } })).newPage();
+/** allow: console errors this page is expected to log (browsers log every 4xx response). */
+const newPage = async (
+  name: string,
+  { allow = [] as string[], viewport = { width: 1280, height: 900 }, using = browser } = {},
+) => {
+  const page = await (await using.newContext({ viewport })).newPage();
   page.on('console', (m) => {
     if (m.type() !== 'error') return;
     if (offlineOnPurpose && m.text().includes('net::ERR_INTERNET_DISCONNECTED')) return;
+    if (allow.some((text) => m.text().includes(text))) return;
     consoleErrors.push(`${name}: ${m.text()}`);
   });
   page.on('pageerror', (e) => consoleErrors.push(`${name}: ${e.message}`));
@@ -209,6 +225,17 @@ try {
   await buyer.locator('#pay-button').click();
   await buyer.locator('.ticket img').nth(1).waitFor({ timeout: 20_000 });
   step(`payment confirmed; ${await buyer.locator('.ticket img').count()} QR tickets shown`);
+  // The QR images as the buyer sees them: the door will scan photos of these.
+  const qrImages = await buyer
+    .locator('#tickets .ticket img')
+    .evaluateAll((imgs) => imgs.map((img) => (img as HTMLImageElement).src));
+  const qrFiles = await Promise.all(
+    qrImages.map(async (src, i) => {
+      const file = `.dev/e2e-ticket-${i + 1}.png`;
+      await writeFile(file, Buffer.from(src.split(',')[1]!, 'base64'));
+      return file;
+    }),
+  );
   await buyer.locator('#message', { hasText: buyerEmail }).waitFor();
 
   // ── the tickets, by email, to the address the buyer signed up with ──
@@ -338,16 +365,84 @@ try {
   await visitor.locator('rect.seat').first().waitFor();
   step(`catalog shows ${rows} category row(s); the Theatre grid opens ${new URL(visitor.url()).pathname}`);
 
+  // ── the door: the organizer scans the buyer's tickets ──
+  const openScanner = async (
+    name: string,
+    { viewport, using }: { viewport?: { width: number; height: number }; using?: Browser } = {},
+  ) => {
+    // "Already used" is a 409 from POST /check-in: an answer, not a failure.
+    const page = await newPage(name, { allow: ['status of 409'], viewport, using });
+    await page.goto(`${BASE}/login?next=${encodeURIComponent(`/scan?event=${event.id}`)}`);
+    await page.locator('#email').fill(organizerEmail);
+    await page.locator('#password').fill(organizerPassword);
+    await page.locator('#submit').click();
+    await page.locator('#scanner').waitFor();
+    return page;
+  };
+  // The first door uses its camera. Chromium can play a video file as the camera: one frame
+  // showing ticket 1's QR code, the way a phone would see it held up at the entrance.
+  const frame = await sharp({ create: { width: 640, height: 480, channels: 3, background: '#9aa0a6' } })
+    .composite([{ input: await sharp(qrFiles[0]).resize(300, 300).toBuffer(), left: 170, top: 90 }])
+    .jpeg({ quality: 90 })
+    .toBuffer();
+  await writeFile('.dev/e2e-camera.mjpeg', Buffer.concat(Array<Buffer>(30).fill(frame))); // MJPEG: frames back to back
+  cameraBrowser = await chromium.launch({
+    args: [
+      '--use-fake-ui-for-media-stream', // grant the camera without a prompt
+      '--use-fake-device-for-media-stream',
+      '--use-file-for-fake-video-capture=.dev/e2e-camera.mjpeg',
+    ],
+  });
+  const door = await openScanner('door', { using: cameraBrowser });
+  await door.locator('#camera-button').click();
+  await door.locator('#result.good', { hasText: 'Welcome, E2E Buyer' }).waitFor({ timeout: 15_000 });
+  step(
+    `door camera: ticket 1 → "${await door.locator('#result-title').textContent()}, ${await door.locator('#result-detail').textContent()}"`,
+  );
+  await door.locator('#camera-button').click(); // stop the camera
+  await door.locator('#camera-button', { hasText: 'Start camera' }).waitFor();
+  await door.locator('#photo').setInputFiles(qrFiles[0]!);
+  await door.locator('#result.bad', { hasText: 'Already scanned' }).waitFor();
+  step('door: the same ticket again → "Already scanned" (caught on the device)');
+
+  const otherDoor = await openScanner('other door', { viewport: { width: 390, height: 844 } }); // a phone
+  await otherDoor.locator('#photo').setInputFiles(qrFiles[0]!);
+  await otherDoor.locator('#result.bad', { hasText: 'Already used' }).waitFor();
+  step(`another door: ticket 1 → "Already used", ${await otherDoor.locator('#result-detail').textContent()}`);
+  await otherDoor.waitForTimeout(400); // let the verdict's animation finish
+  await otherDoor.screenshot({ path: '.dev/e2e-door-phone.png', fullPage: true });
+  await otherDoor.locator('#code').fill('not-a-ticket');
+  await otherDoor.locator('#manual button').click();
+  await otherDoor.locator('#result.bad', { hasText: 'Not a Ticket MNG ticket' }).waitFor();
+  step('another door: a typed code that isn\'t a ticket → "Not a Ticket MNG ticket"');
+
+  offlineOnPurpose = true;
+  await door.context().setOffline(true);
+  await door.locator('#photo').setInputFiles(qrFiles[1]!);
+  await door.locator('#result.offline', { hasText: 'Admitted (offline)' }).waitFor();
+  await door.locator('#sync-status', { hasText: '1 check-in waiting to sync' }).waitFor();
+  // The first ticket shows as checked in, from this device's own scan, without a poll.
+  await door.locator('#checked-in', { hasText: '1' }).waitFor();
+  step('door, offline: ticket 2 → "Admitted (offline)", signature checked on the device; 1 waiting to sync');
+  await door.screenshot({ path: '.dev/e2e-door-offline.png', fullPage: true });
+  await door.context().setOffline(false);
+  await door.locator('#sync-status').waitFor({ state: 'hidden', timeout: 20_000 });
+  offlineOnPurpose = false;
+  await door.locator('#checked-in', { hasText: '2' }).waitFor({ timeout: 10_000 });
+  step(`door, back online: synced; attendance reads "${await door.locator('.attendance p').textContent()}"`);
+  await door.waitForTimeout(500); // the progress bar animates
+  await door.screenshot({ path: '.dev/e2e-door.png', fullPage: true });
+
   if (consoleErrors.length) throw new Error(`browser console errors:\n${consoleErrors.join('\n')}`);
   step('no browser console errors');
   console.log(
-    '\nE2E passed. Screenshots: .dev/e2e-watcher-held.png, .dev/e2e-buyer-tickets.png, .dev/e2e-watcher-sold.png, .dev/e2e-my-tickets.png, .dev/e2e-offline-tickets.png',
+    '\nE2E passed. Screenshots: .dev/e2e-watcher-held.png, .dev/e2e-buyer-tickets.png, .dev/e2e-watcher-sold.png, .dev/e2e-my-tickets.png, .dev/e2e-offline-tickets.png, .dev/e2e-door.png',
   );
 } catch (err) {
   console.error('E2E FAILED:', err);
   process.exitCode = 1;
 } finally {
-  await browser.close();
+  await Promise.all([browser.close(), cameraBrowser?.close()]);
   // Take the test event off the public catalog (its bookings stay, for inspection).
   await db.updateTable('events').set({ status: 'draft' }).where('id', '=', event.id).execute();
   await Promise.all([db.destroy(), redis.quit()]);

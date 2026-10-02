@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#18181b" media="(prefers-color-scheme: dark)" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <title>Door scanner · Ticket MNG</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/site.css" />
+    <link rel="stylesheet" href="/scan.css" />
+    <script type="module" src="/scan.js"></script>
+  </head>
+  <body>
+    <header id="site-header"></header>
+
+    <main class="scan-page">
+      <div class="scan-head">
+        <h1>Door scanner</h1>
+        <span id="sync-status" class="sync-status" role="status" hidden></span>
+      </div>
+      <p id="notice" class="scan-notice" hidden></p>
+
+      <div id="scanner" hidden>
+        <label class="event-picker">
+          <span class="muted">Event</span>
+          <select id="event"></select>
+        </label>
+
+        <div class="attendance">
+          <p><strong id="checked-in">–</strong> of <span id="sold">–</span> checked in</p>
+          <div class="bar" aria-hidden="true"><span id="bar-fill"></span></div>
+        </div>
+
+        <div class="camera">
+          <video id="video" playsinline muted></video>
+          <div class="viewfinder" aria-hidden="true"></div>
+          <button id="camera-button" type="button">Start camera</button>
+        </div>
+
+        <div id="result" class="result idle" role="status" aria-live="assertive">
+          <span id="result-icon" class="result-icon" aria-hidden="true">⌁</span>
+          <div>
+            <strong id="result-title">Ready to scan</strong>
+            <span id="result-detail">Point the camera at a ticket's QR code.</span>
+          </div>
+        </div>
+
+        <div class="fallbacks">
+          <label class="upload">
+            Upload a photo
+            <input id="photo" type="file" accept="image/*" capture="environment" />
+          </label>
+          <form id="manual" class="manual">
+            <input
+              id="code"
+              placeholder="…or paste a ticket code"
+              autocomplete="off"
+              aria-label="Ticket code"
+            />
+            <button type="submit" class="secondary">Check</button>
+          </form>
+        </div>
+
+        <section id="problems" class="problems" hidden>
+          <div class="problems-head">
+            <h2>Offline check-ins the server refused</h2>
+            <button id="dismiss-problems" type="button" class="secondary">Dismiss</button>
+          </div>
+          <ul id="problem-list"></ul>
+        </section>
+
+        <section class="recent">
+          <h2>Latest check-ins</h2>
+          <ol id="recent"></ol>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>

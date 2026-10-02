@@ -34,6 +34,7 @@ const TEMPLATE = `
           <span id="menu-verified" class="verified-badge"></span>
         </div>
         <a href="/my-tickets" role="menuitem">My tickets</a>
+        <a id="scanner-link" href="/scan" role="menuitem" hidden>Door scanner</a>
         <button id="logout" type="button" role="menuitem">Log out</button>
       </div>
     </div>
@@ -148,6 +149,7 @@ export function mountHeader({ active, onLogout } = {}) {
       $('menu-email').textContent = user.email;
       $('menu-verified').textContent = user.emailVerified ? 'Email confirmed' : 'Email not confirmed yet';
       $('menu-verified').classList.toggle('pending', !user.emailVerified);
+      $('scanner-link').hidden = user.role === 'attendee';
     } else {
       closeMenu();
     }

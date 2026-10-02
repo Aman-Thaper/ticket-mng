@@ -274,6 +274,34 @@ The door is where the signal is worst, so tickets have to open without one ([ADR
 - **Why a saved QR code is enough.** It's a signed token, so a copy is as good as the original. Whether it was already used or refunded is checked by the scanner at the door, never by the picture.
 - **Calendar.** `GET /bookings/:id/calendar.ics` and the ticket email's attachment are the same RFC 5545 file (`src/lib/ical.ts`): UTC times, CRLF lines folded at 75 bytes, escaped text, a reminder 2 hours before. The UID is fixed per booking, so adding it twice updates one entry instead of duplicating it. My tickets also offers a Google Calendar link, built in the browser.
 
+## At the door: the scanner
+
+`/scan` (`public/scan.js`) turns an organizer's phone into a ticket scanner that keeps working when the venue's signal doesn't ([ADR 0015](adr/0015-offline-door-scanning.md)).
+
+```mermaid
+sequenceDiagram
+  participant S as Scanner (phone)
+  participant API
+  S->>S: decode the QR (BarcodeDetector, or jsQR)
+  S->>S: verify the Ed25519 signature with the public key (WebCrypto)
+  S->>S: right event? not already admitted on this device?
+  alt online
+    S->>API: POST /check-in {token}
+    API-->>S: 200 "Welcome, Ada · Stalls A1" / 409 already used / 409 refunded
+  else no signal
+    S->>S: admit provisionally, queue {token, scannedAt} in IndexedDB
+    Note over S,API: when the connection returns
+    S->>API: POST /check-in {token, scannedAt}
+    API-->>S: 200, or a conflict listed for staff (used at another door, refunded)
+  end
+```
+
+- **The signature does the offline work.** A ticket is `payload.signature`, Ed25519-signed by the server. The scanner holds only the public key (`GET /tickets/public-key`, kept on the device), so it can reject forgeries and tickets for other events without the server, and nothing on the phone can mint tickets.
+- **The database still decides admission.** Online, `POST /check-in` admits a ticket with one conditional `UPDATE`, so two doors scanning the same code at the same instant admit it once. Offline, a device catches repeats of the tickets it admitted itself; a ticket shown at two offline doors is admitted twice, and the second sync reports it. That's the trade-off for letting people in when the network is down.
+- **Real scan times.** Queued check-ins carry `scannedAt` (accepted up to 24 hours back, never in the future), so attendance shows when people actually came in, not when the phone found a signal.
+- **Attendance by polling.** `GET /events/:id/attendance` (sold, checked in, the last 10 scans) is polled every 3 s by each scanner. A handful of organizer screens don't justify authenticated WebSockets; a 1 s micro-cache and ETags keep polling cheap, and the partial index `tickets (event_id, checked_in_at DESC)` serves the latest scans. Each scanner shows its own check-ins at once, without waiting for the next poll.
+- **Camera fallbacks.** Cameras need HTTPS. Without one (or a camera), staff can upload a photo or type the code. jsQR is served from `public/vendor/` because the CSP allows our own scripts only.
+
 ## Caching
 
 | Data                                                     | Layer                                                                                                    | Invalidation                                                                                                                               |

@@ -167,6 +167,7 @@ It only filters out requests that would lose anyway. Postgres makes the actual d
 3. `src/jobs/handlers/email.ts` (`sendOnce`), `src/lib/mailer.ts` and `src/lib/resend.ts`: email transports, idempotency keys, and which provider errors are worth retrying ([ADR 0012](adr/0012-resend.md)).
 4. `src/modules/tickets/signing.ts` and `service.ts`: Ed25519 tickets, one-shot check-in.
    Then the tickets on the phone: `src/lib/ical.ts` and `src/modules/tickets/calendar.ts` (the .ics file), `public/sw.js`, `public/offline-store.js` and `public/my-tickets.js` (offline tickets, [ADR 0014](adr/0014-offline-tickets.md)).
+   And the door: `public/scan.js` and `public/scan-store.js`, the check-in and attendance routes in `src/modules/tickets/routes.ts` ([ADR 0015](adr/0015-offline-door-scanning.md)).
 5. `src/modules/events/posters.ts` and `src/jobs/handlers/media.ts`: presigned uploads and resizing.
 6. `src/worker.ts` and `src/jobs/schedules.ts`.
 7. [ADR 0004](adr/0004-transactional-outbox.md).
@@ -176,6 +177,7 @@ It only filters out requests that would lose anyway. Postgres makes the actual d
 - Stop the worker, buy a ticket, look at the `outbox` table, start the worker, watch the email arrive (Mailpit: http://localhost:8025). Nothing was lost.
 - Make a handler throw, and watch retries with backoff, then the dead letter at `GET /api/v1/admin/dead-letters`.
 - Check in the same ticket twice concurrently: exactly one succeeds.
+- Log in as an organizer, open `/scan`, and scan a ticket from My tickets in another window (upload a screenshot of the QR code). Scan it again, then switch the scanner's tab to offline (DevTools → Network → Offline), scan another, and go back online: watch it sync.
 - Open My tickets, then in DevTools: Network → Offline, and reload. The page and the QR codes still open. Look at Application → IndexedDB → `ticket-mng` for the saved copy and Application → Cache storage for the public files; log out and watch the saved copy disappear.
 
 **Questions:**
@@ -208,6 +210,16 @@ Cache-first is faster, but a new release then needs a second page load to appear
 <details><summary>What does an .ics file have to get right, and why are its times in UTC?</summary>
 
 CRLF line endings; lines folded at 75 bytes (not characters, and never in the middle of a UTF-8 character); commas, semicolons, backslashes and newlines escaped in text; and a stable UID so adding it twice updates one entry. UTC is an absolute instant that every calendar shows in its owner's zone. Writing the venue's zone (TZID) would also need a full VTIMEZONE definition in the file to be portable. See `src/lib/ical.ts`.
+</details>
+
+<details><summary>The door scanner has no signal. How can it still reject a fake ticket, and what can't it know?</summary>
+
+The ticket carries its own proof: an Ed25519 signature over the ticket and event ids. The scanner keeps the public key and verifies with WebCrypto, so forgeries and tickets for other shows are refused on the spot. What it can't know offline is whether another door already admitted that ticket. It admits genuine tickets provisionally, remembers them (repeats on the same device are caught), and syncs later with the real scan time; anything the server refuses then is listed for staff. Letting a rare duplicate through beats stopping the whole line.
+</details>
+
+<details><summary>Live attendance is polled every 3 seconds. Why not a WebSocket, like the seat map?</summary>
+
+The audience is a few organizer screens, not thousands of buyers, and browsers can't send an Authorization header on a WebSocket, so it would need its own auth scheme. Polling reuses the normal authenticated API; a 1 s micro-cache, ETags (unchanged → 304) and an index on `(event_id, checked_in_at)` make each poll cheap. Push pays off when one change must reach many viewers, as with seats.
 </details>
 
 <details><summary>Why sign tickets with Ed25519 rather than store a random code?</summary>

@@ -60,7 +60,15 @@ const genReqId = (req: { headers: Record<string, string | string[] | undefined> 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 /** Browser security policy for the demo pages: only our own scripts, styles and API. */
-const PAGES = ['login', 'signup', 'forgot-password', 'reset-password', 'verify-email', 'my-tickets'] as const;
+const PAGES = [
+  'login',
+  'signup',
+  'forgot-password',
+  'reset-password',
+  'verify-email',
+  'my-tickets',
+  'scan',
+] as const;
 
 const STATIC_CSP = [
   "default-src 'self'",

@@ -18,6 +18,7 @@ Short notes on the decisions that shaped this system: the problem, what was chos
 | [0012](0012-resend.md)                   | Email through Resend's HTTP API, with idempotency keys and pacing           |
 | [0013](0013-viewer-counts.md)            | "N viewing now": per-replica counts in a Redis hash, fields expiring alone  |
 | [0014](0014-offline-tickets.md)          | Offline tickets: public files in the service worker, tickets in IndexedDB   |
+| [0015](0015-offline-door-scanning.md)    | Door scanning works offline: verify on the device, admit, reconcile later   |
 
 Template:
 

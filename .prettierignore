@@ -3,3 +3,5 @@ coverage/
 .dev/
 package-lock.json
 dist/
+# third-party files, copied as published (npm run vendor)
+public/vendor/
