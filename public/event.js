@@ -23,6 +23,7 @@ import {
   time,
 } from './format.js';
 import { mountHeader } from './header.js';
+import { refreshSavedTickets } from './saved-tickets.js';
 import {
   api,
   describeError,
@@ -716,6 +717,8 @@ async function showTickets(bookingId) {
     card.append(img, caption);
     box.append(card);
   }
+  // Keep them on this device too, so My tickets opens at the door without a connection.
+  if (session.user) void refreshSavedTickets(session.user);
 }
 
 $('cancel-button').addEventListener('click', async () => {

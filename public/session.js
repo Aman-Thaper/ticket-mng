@@ -6,6 +6,11 @@
 //     /api/v1/auth; POST /auth/refresh trades it for a fresh access token;
 //   - a readable "has_session" cookie says whether a refresh is worth trying, so logged-out
 //     visitors don't produce a 401 on every page load.
+//
+// Tickets saved for offline use (offline-store.js) are deleted on logout, on login, and
+// when the server ends the session.
+
+import { clearSavedTickets } from './offline-store.js';
 
 export class ApiError extends Error {
   constructor(status, body) {
@@ -16,7 +21,8 @@ export class ApiError extends Error {
   }
 }
 
-export const session = { token: null, user: null };
+/** offline: the last refresh couldn't reach the server (as opposed to "not logged in"). */
+export const session = { token: null, user: null, offline: false };
 const listeners = new Set();
 
 /** Call fn(user) whenever the session changes (login, logout, refresh). */
@@ -24,10 +30,14 @@ export function onSessionChange(fn) {
   listeners.add(fn);
 }
 
+const notify = () => {
+  for (const fn of listeners) fn(session.user);
+};
+
 function setSession(auth) {
   session.token = auth?.accessToken ?? null;
   session.user = auth?.user ?? null;
-  for (const fn of listeners) fn(session.user);
+  notify();
 }
 
 const hasSessionHint = () => document.cookie.split('; ').includes('has_session=1');
@@ -38,10 +48,16 @@ export function refreshSession() {
   refreshing ??= (async () => {
     try {
       const res = await fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin' });
+      session.offline = false;
+      // The server says this session is over (expired, revoked, logged out elsewhere): its
+      // saved tickets go with it. Saved tickets live exactly as long as the session.
+      if (res.status === 401) await clearSavedTickets();
       setSession(res.ok ? await res.json() : null);
       return res.ok;
     } catch {
-      return false; // offline: keep whatever we had
+      session.offline = true; // keep whatever we had
+      notify();
+      return false;
     } finally {
       refreshing = null;
     }
@@ -55,7 +71,11 @@ export async function restoreSession() {
   return session.user;
 }
 
-export async function api(path, { method = 'GET', body, headers = {}, retryAuth = true } = {}) {
+/** responseType 'blob' returns the body as a Blob (a file download) instead of parsed JSON. */
+export async function api(
+  path,
+  { method = 'GET', body, headers = {}, retryAuth = true, responseType = 'json' } = {},
+) {
   const res = await fetch(`/api/v1${path}`, {
     method,
     credentials: 'same-origin',
@@ -68,8 +88,9 @@ export async function api(path, { method = 'GET', body, headers = {}, retryAuth 
   });
   // An expired access token: refresh once and replay the request.
   if (res.status === 401 && retryAuth && session.token && (await refreshSession())) {
-    return api(path, { method, body, headers, retryAuth: false });
+    return api(path, { method, body, headers, retryAuth: false, responseType });
   }
+  if (res.ok && responseType === 'blob') return res.blob();
   const data = res.status === 204 ? null : await res.json().catch(() => null);
   if (!res.ok) throw new ApiError(res.status, data);
   return data;
@@ -78,22 +99,23 @@ export async function api(path, { method = 'GET', body, headers = {}, retryAuth 
 /** Log in or sign up: both answer with { user, accessToken } and set the refresh cookie. */
 export async function authenticate(path, body) {
   const auth = await api(path, { method: 'POST', body, retryAuth: false });
+  await clearSavedTickets(); // whoever was here before, their tickets don't stay
   setSession(auth);
   return auth.user;
 }
 
 export async function logout() {
   await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+  await clearSavedTickets();
   setSession(null);
 }
 
 /** Re-read the profile (e.g. after the email address was confirmed in another tab). */
 export async function reloadUser() {
   if (!session.token) return null;
-  const user = await api('/users/me');
-  session.user = user;
-  for (const fn of listeners) fn(user);
-  return user;
+  session.user = await api('/users/me');
+  notify();
+  return session.user;
 }
 
 // ─── redirects ─────────────────────────────────────────────────────────────────────────

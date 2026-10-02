@@ -112,8 +112,14 @@ describe('background jobs', () => {
 
       const mail = sentMail[0]!;
       expect(mail).toMatchObject({ to: buyer.email, subject: 'Your tickets: Test Concert' });
-      expect(mail.attachments).toHaveLength(2);
-      for (const a of mail.attachments!) expect(mail.html).toContain(`cid:${a.cid}`);
+      // Two QR codes shown inline (referenced by cid), and the calendar entry as a plain file.
+      const qrCodes = mail.attachments!.filter((a) => a.contentType === 'image/png');
+      expect(qrCodes).toHaveLength(2);
+      for (const a of qrCodes) expect(mail.html).toContain(`cid:${a.cid}`);
+      expect(mail.attachments!.filter((a) => String(a.contentType).startsWith('text/calendar'))).toHaveLength(
+        1,
+      );
+      expect(mail.attachments).toHaveLength(3);
       // One key per booking: a retried job can't make the provider send the tickets twice.
       expect(mail.idempotencyKey).toBe(`booking-confirmed/${booking.id}`);
       const notification = await db

@@ -14,7 +14,9 @@ export const BookingDto = z
       id: z.uuid(),
       title: z.string(),
       startsAt: Timestamp,
+      endsAt: Timestamp,
       venueName: z.string(),
+      city: z.string(),
       timezone: z.string().describe("The venue's IANA time zone"),
     }),
     items: z.array(
@@ -66,8 +68,10 @@ function selectBookings() {
       'e.id as eventId',
       'e.title as eventTitle',
       'e.startsAt as eventStartsAt',
+      'e.endsAt as eventEndsAt',
       'e.organizerId',
       'v.name as venueName',
+      'v.city as venueCity',
       'v.timezone as venueTimezone',
     ]);
 }
@@ -156,7 +160,9 @@ function toDto(
       id: b.eventId,
       title: b.eventTitle,
       startsAt: b.eventStartsAt.toISOString(),
+      endsAt: b.eventEndsAt.toISOString(),
       venueName: b.venueName,
+      city: b.venueCity,
       timezone: b.venueTimezone,
     },
     items,

@@ -77,6 +77,15 @@ body {
   color: #fff;
 }
 
+.offline-pill {
+  padding: 5px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #92400e;
+  background: #fef3c7;
+  border-radius: 999px;
+}
+
 .account,
 .guest {
   display: flex;

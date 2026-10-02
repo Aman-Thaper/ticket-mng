@@ -20,6 +20,7 @@ const TEMPLATE = `
       <a id="login-link" class="nav-link" href="/login">Log in</a>
       <a id="signup-link" class="nav-button" href="/signup">Sign up</a>
     </div>
+    <span id="offline-pill" class="offline-pill" hidden>Offline</span>
     <div id="user-menu" class="user-menu" hidden>
       <button id="menu-button" class="menu-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="menu">
         <span id="avatar" class="avatar" aria-hidden="true"></span>
@@ -44,6 +45,15 @@ const BANNER = `
   <span id="banner-note" class="banner-note" role="status" aria-live="polite"></span>`;
 
 const $ = (id) => document.getElementById(id);
+
+// The service worker makes the site installable and its pages (and saved tickets) open
+// offline: sw.js. Browsers allow it on HTTPS and localhost only. Registered once the page
+// has loaded, so its downloads don't compete with the page's own.
+if ('serviceWorker' in navigator) {
+  const register = () => navigator.serviceWorker.register('/sw.js').catch(() => {});
+  if (document.readyState === 'complete') register();
+  else window.addEventListener('load', register, { once: true });
+}
 
 const initials = (name) =>
   name
@@ -126,7 +136,10 @@ export function mountHeader({ active, onLogout } = {}) {
   });
 
   const render = (user) => {
-    $('guest').hidden = Boolean(user);
+    // Offline, a signed-in visitor isn't logged out: the session just couldn't be checked.
+    const offline = !user && session.offline;
+    $('guest').hidden = Boolean(user) || offline;
+    $('offline-pill').hidden = !offline;
     $('user-menu').hidden = !user;
     if (user) {
       $('avatar').textContent = initials(user.name);

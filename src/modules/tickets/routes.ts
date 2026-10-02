@@ -7,6 +7,7 @@ import { AppError, conflict, notFound } from '../../lib/errors.js';
 import { errors, IdParams, Timestamp } from '../../lib/schemas.js';
 import { bearerAuth, canManage, currentUser, requireAuth, requireRole } from '../auth/guard.js';
 import { assertBookingOwner } from '../bookings/queries.js';
+import { bookingCalendar, calendarFilename, loadBookingForCalendar } from './calendar.js';
 import { qrDataUrl, ticketsForBooking } from './service.js';
 import { publicKeyJwk, publicKeyPem, verifyTicket } from './signing.js';
 
@@ -50,6 +51,41 @@ export const ticketRoutes: FastifyPluginAsyncZod = async (app) => {
           qr: await qrDataUrl(t.token),
         })),
       );
+    },
+  );
+
+  app.get(
+    '/bookings/:id/calendar.ics',
+    {
+      onRequest: requireAuth,
+      schema: {
+        tags: ['tickets'],
+        summary: 'A confirmed booking as a calendar entry (.ics)',
+        description:
+          'An iCalendar file (text/calendar) for Apple Calendar, Outlook or Google Calendar, with a reminder 2 hours ' +
+          'before. Its UID is fixed per booking, so adding it twice updates one entry. The ticket email attaches the same file.',
+        security: bearerAuth,
+        params: IdParams,
+        response: {
+          200: {
+            description: 'The calendar file',
+            content: { 'text/calendar': { schema: z.string() } },
+          },
+          ...errors,
+        },
+      },
+    },
+    async (req, reply) => {
+      await assertBookingOwner(currentUser(req), req.params.id);
+      const booking = await loadBookingForCalendar(req.params.id);
+      if (booking?.status !== 'confirmed') {
+        throw conflict('BOOKING_NOT_CONFIRMED', 'Only a confirmed booking can be added to a calendar');
+      }
+      return reply
+        .type('text/calendar; charset=utf-8')
+        .header('content-disposition', `attachment; filename="${calendarFilename(booking.event.title)}"`)
+        .header('cache-control', 'private, no-store')
+        .send(bookingCalendar(booking));
     },
   );
 

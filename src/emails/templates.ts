@@ -154,6 +154,8 @@ export function bookingConfirmedEmail(
   to: { email: string; name: string },
   booking: BookingForEmail,
   tickets: TicketForEmail[],
+  /** An .ics file: calendar apps offer "Add to calendar" for it. */
+  calendar?: { filename: string; content: string },
 ): Mail {
   const seatLine = (t: TicketForEmail) => `${t.section}, row ${t.row}, seat ${t.number}`;
   const ev = booking.event;
@@ -181,7 +183,8 @@ export function bookingConfirmedEmail(
       `Hi ${to.name},\n\nYou're going to ${ev.title}!\n${when(ev.startsAt, ev.timezone)}\n${ev.venueName}, ${ev.venueAddress}, ${ev.city}\n\n` +
       tickets.map((t) => `- ${seatLine(t)}`).join('\n') +
       `\n\nTotal paid: ${money(booking.totalCents, booking.currency)}\nBooking reference: ${booking.id}\n\n` +
-      'Your QR tickets are attached. Show them at the door; each one can be scanned once.',
+      'Your QR tickets are attached. Show them at the door; each one can be scanned once.' +
+      (calendar ? '\nTo add the event to your calendar, open the attached .ics file.' : ''),
     html: layout({
       title: `You're going to ${ev.title}`,
       preview: `${tickets.length} ticket${tickets.length === 1 ? '' : 's'} for ${when(ev.startsAt, ev.timezone)}. Show the QR codes at the door.`,
@@ -192,15 +195,27 @@ ${ticketCards}
 <tr><td style="color:#475569">Total paid</td><td align="right" style="font-weight:700">${escape(money(booking.totalCents, booking.currency))}</td></tr>
 <tr><td style="color:#475569;padding-top:6px">Booking reference</td><td align="right" style="padding-top:6px;font-family:Menlo,Consolas,monospace;font-size:12px">${booking.id}</td></tr>
 </table>
-${note('Show the QR code at the entrance, on your phone or printed. Each code admits one person, once. The codes are also attached to this email.')}`,
+${note(`Show the QR code at the entrance, on your phone or printed. Each code admits one person, once. The codes are also attached to this email${calendar ? ', with a calendar entry for the event' : ''}.`)}`,
       footer: 'You received this email because you booked tickets on Ticket MNG.',
     }),
-    attachments: tickets.map((t) => ({
-      filename: `ticket-${t.section}-${t.row}${t.number}.png`.replace(/\s+/g, '-'),
-      content: t.qrPng,
-      contentType: 'image/png',
-      cid: `ticket-${t.id}`,
-    })),
+    attachments: [
+      ...tickets.map((t) => ({
+        filename: `ticket-${t.section}-${t.row}${t.number}.png`.replace(/\s+/g, '-'),
+        content: t.qrPng,
+        contentType: 'image/png',
+        cid: `ticket-${t.id}`,
+      })),
+      ...(calendar
+        ? [
+            {
+              filename: calendar.filename,
+              content: calendar.content,
+              // method=PUBLISH tells Outlook it's an entry to add, not a meeting invitation.
+              contentType: 'text/calendar; charset=utf-8; method=PUBLISH',
+            },
+          ]
+        : []),
+    ],
   };
 }
 

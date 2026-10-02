@@ -166,6 +166,7 @@ It only filters out requests that would lose anyway. Postgres makes the actual d
 2. `src/jobs/runner.ts`: retries, backoff, the dead-letter queue, logging with the request id.
 3. `src/jobs/handlers/email.ts` (`sendOnce`), `src/lib/mailer.ts` and `src/lib/resend.ts`: email transports, idempotency keys, and which provider errors are worth retrying ([ADR 0012](adr/0012-resend.md)).
 4. `src/modules/tickets/signing.ts` and `service.ts`: Ed25519 tickets, one-shot check-in.
+   Then the tickets on the phone: `src/lib/ical.ts` and `src/modules/tickets/calendar.ts` (the .ics file), `public/sw.js`, `public/offline-store.js` and `public/my-tickets.js` (offline tickets, [ADR 0014](adr/0014-offline-tickets.md)).
 5. `src/modules/events/posters.ts` and `src/jobs/handlers/media.ts`: presigned uploads and resizing.
 6. `src/worker.ts` and `src/jobs/schedules.ts`.
 7. [ADR 0004](adr/0004-transactional-outbox.md).
@@ -175,6 +176,7 @@ It only filters out requests that would lose anyway. Postgres makes the actual d
 - Stop the worker, buy a ticket, look at the `outbox` table, start the worker, watch the email arrive (Mailpit: http://localhost:8025). Nothing was lost.
 - Make a handler throw, and watch retries with backoff, then the dead letter at `GET /api/v1/admin/dead-letters`.
 - Check in the same ticket twice concurrently: exactly one succeeds.
+- Open My tickets, then in DevTools: Network → Offline, and reload. The page and the QR codes still open. Look at Application → IndexedDB → `ticket-mng` for the saved copy and Application → Cache storage for the public files; log out and watch the saved copy disappear.
 
 **Questions:**
 
@@ -191,6 +193,21 @@ If the process dies (or Redis is unreachable) between the commit and the enqueue
 <details><summary>Which email failures should a job retry, and which should go straight to the dead-letter queue?</summary>
 
 Retry what time can fix: a rate limit (429), a concurrent request with the same key, a provider outage (5xx), a timeout. Dead-letter what it can't: a bad API key, an unverified sending domain, an invalid address, or a used-up quota (it resets hours later, far beyond the job's backoff). Retrying those only delays the moment someone learns what to fix. See `src/lib/resend.ts`.
+</details>
+
+<details><summary>The easiest way to make tickets work offline is to cache the API responses in the service worker. Why doesn't this app?</summary>
+
+Cache Storage isn't tied to a login: it survives logout and is shared by everyone using the browser, so one person's tickets would show up offline for the next. The service worker caches only public files. Tickets go in IndexedDB, written by My tickets and deleted on logout, on login and when the server ends the session: they live exactly as long as the session.
+</details>
+
+<details><summary>Why is the service worker network-first rather than cache-first?</summary>
+
+Cache-first is faster, but a new release then needs a second page load to appear, and a page can end up mixing scripts from two releases. Network-first always serves the current release when online, and falls back to the cache when offline or after 4 s on a bad connection. The only cost is waiting for the network when it's slow.
+</details>
+
+<details><summary>What does an .ics file have to get right, and why are its times in UTC?</summary>
+
+CRLF line endings; lines folded at 75 bytes (not characters, and never in the middle of a UTF-8 character); commas, semicolons, backslashes and newlines escaped in text; and a stable UID so adding it twice updates one entry. UTC is an absolute instant that every calendar shows in its owner's zone. Writing the venue's zone (TZID) would also need a full VTIMEZONE definition in the file to be portable. See `src/lib/ical.ts`.
 </details>
 
 <details><summary>Why sign tickets with Ed25519 rather than store a random code?</summary>

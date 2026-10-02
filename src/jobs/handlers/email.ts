@@ -12,6 +12,7 @@ import {
 import { sendMail, type Mail } from '../../lib/mailer.js';
 import { hashToken, newOpaqueToken } from '../../modules/auth/tokens.js';
 import { issueVerificationToken } from '../../modules/auth/verification.js';
+import { bookingCalendar, calendarFilename } from '../../modules/tickets/calendar.js';
 import { qrPng, ticketsForBooking } from '../../modules/tickets/service.js';
 import type { JobHandler } from '../runner.js';
 import type { Jobs } from '../queues.js';
@@ -69,10 +70,13 @@ async function loadBookingForEmail(bookingId: string) {
       'b.totalCents',
       'b.currency',
       'b.userId',
+      'b.confirmedAt',
       'u.email',
       'u.name',
       'e.title',
       'e.startsAt',
+      'e.endsAt',
+      'e.updatedAt as eventUpdatedAt',
       'e.status as eventStatus',
       'v.name as venueName',
       'v.address as venueAddress',
@@ -185,11 +189,28 @@ export const bookingConfirmed: JobHandler<Jobs['email']['booking-confirmed']> = 
 
   const tickets = (await ticketsForBooking(booking.id)).filter((t) => t.status === 'valid');
   const withQr = await Promise.all(tickets.map(async (t) => ({ ...t, qrPng: await qrPng(t.token) })));
+  const calendar = bookingCalendar({
+    id: booking.id,
+    confirmedAt: booking.confirmedAt ?? new Date(),
+    seats: tickets.map((t) => `${t.section}, row ${t.row}, seat ${t.number}`),
+    event: {
+      title: booking.title,
+      startsAt: booking.startsAt,
+      endsAt: booking.endsAt,
+      updatedAt: booking.eventUpdatedAt,
+      venueName: booking.venueName,
+      venueAddress: booking.venueAddress,
+      city: booking.city,
+    },
+  });
   const outcome = await sendOnce(
     'booking-confirmed',
     booking.id,
     booking.userId,
-    bookingConfirmedEmail(booking, forEmail(booking), withQr),
+    bookingConfirmedEmail(booking, forEmail(booking), withQr, {
+      filename: calendarFilename(booking.title),
+      content: calendar,
+    }),
   );
   return { outcome, tickets: tickets.length };
 };

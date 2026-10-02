@@ -9,10 +9,12 @@
  * tickets, and the email with those QR codes must arrive at the address they signed up with.
  * Meanwhile a second browser, the "watcher", must see the seats turn held, then sold, live
  * over the WebSocket, without reloading, along with "2 sold in the last hour" and the
- * viewer count. The catalog must then list the event under "Trending now".
+ * viewer count. The catalog must then list the event under "Trending now". My tickets must
+ * download a calendar file, and reopen with its QR codes with the network off.
  * Screenshots go to .dev/e2e-*.png.
  * Needs the API, the worker (it sends email and confirms payments) and Mailpit.
  */
+import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { chromium, type Page } from 'playwright';
 import { sql } from 'kysely';
@@ -38,6 +40,7 @@ interface MailDetail {
   Text: string;
   HTML: string;
   Inline: { ContentType: string; ContentID: string }[];
+  Attachments: { ContentType: string; FileName: string }[];
 }
 
 /** Wait for an email to `to` whose subject starts with `subject`, via Mailpit's API. */
@@ -118,9 +121,15 @@ await sql`
 // ─── two browsers ────────────────────────────────────────────────────────────────────────
 const browser = await chromium.launch();
 const consoleErrors: string[] = [];
+/** While the test has a browser offline on purpose, its failed requests are expected. */
+let offlineOnPurpose = false;
 const newPage = async (name: string) => {
   const page = await (await browser.newContext({ viewport: { width: 1280, height: 900 } })).newPage();
-  page.on('console', (m) => m.type() === 'error' && consoleErrors.push(`${name}: ${m.text()}`));
+  page.on('console', (m) => {
+    if (m.type() !== 'error') return;
+    if (offlineOnPurpose && m.text().includes('net::ERR_INTERNET_DISCONNECTED')) return;
+    consoleErrors.push(`${name}: ${m.text()}`);
+  });
   page.on('pageerror', (e) => consoleErrors.push(`${name}: ${e.message}`));
   return page;
 };
@@ -208,7 +217,11 @@ try {
   if (qrCodes.length !== 2) throw new Error(`expected 2 QR codes in the email, got ${qrCodes.length}`);
   if (!qrCodes.every((qr) => ticketsMail.HTML.includes(`cid:${qr.ContentID}`)))
     throw new Error('QR images are not embedded in the email body');
-  step(`"${ticketsMail.Subject}" arrived at ${buyerEmail} with ${qrCodes.length} QR codes embedded`);
+  const calendarFile = ticketsMail.Attachments.find((a) => a.ContentType.startsWith('text/calendar'));
+  if (!calendarFile) throw new Error('the ticket email has no calendar (.ics) attachment');
+  step(
+    `"${ticketsMail.Subject}" arrived at ${buyerEmail} with ${qrCodes.length} QR codes embedded and ${calendarFile.FileName}`,
+  );
   await buyer.screenshot({ path: '.dev/e2e-buyer-tickets.png', fullPage: true });
 
   await watcher.waitForFunction(
@@ -254,6 +267,60 @@ try {
   await booking.locator('button', { hasText: 'Show tickets' }).click();
   await booking.locator('.qr-ticket img').nth(1).waitFor();
   step(`My tickets lists the booking with its ${await booking.locator('.qr-ticket img').count()} QR codes`);
+  await buyer.screenshot({ path: '.dev/e2e-my-tickets.png', fullPage: true });
+
+  // ── add to calendar ──
+  const [download] = await Promise.all([
+    buyer.waitForEvent('download'),
+    booking.locator('button', { hasText: 'Add to calendar' }).click(),
+  ]);
+  const ics = await readFile(await download.path(), 'utf8');
+  if (!ics.includes('BEGIN:VEVENT') || !ics.includes('SUMMARY:E2E: Live Seat Map'))
+    throw new Error(`unexpected calendar file:\n${ics}`);
+  step(`"Add to calendar" downloads ${download.suggestedFilename()}`);
+
+  // ── offline: the page and the tickets were saved on this device ──
+  await buyer.waitForFunction(() => navigator.serviceWorker.controller !== null, undefined, {
+    timeout: 10_000,
+  });
+  offlineOnPurpose = true;
+  await buyer.context().setOffline(true);
+  await buyer.reload();
+  await buyer.locator('.offline-banner', { hasText: "You're offline" }).waitFor();
+  await buyer.locator('#offline-pill').waitFor(); // not "Log in": the session just can't be checked
+  const saved = buyer.locator('.booking', { hasText: 'E2E: Live Seat Map' }).first();
+  await saved.locator('button', { hasText: 'Show tickets' }).click();
+  await saved.locator('.qr-ticket img').nth(1).waitFor();
+  step(
+    `offline: My tickets reopens from the device, with ${await saved.locator('.qr-ticket img').count()} QR codes`,
+  );
+  await buyer.screenshot({ path: '.dev/e2e-offline-tickets.png', fullPage: true });
+  await buyer.context().setOffline(false);
+  await buyer.locator('.offline-banner').waitFor({ state: 'detached', timeout: 10_000 });
+  offlineOnPurpose = false;
+  step('back online: the page reloads its live version by itself');
+
+  // ── logging out deletes the saved tickets ──
+  await buyer.locator('#menu-button').click();
+  await buyer.locator('#logout').click();
+  await buyer.waitForURL(`${BASE}/`);
+  // Read IndexedDB directly, not through the page's own code.
+  const left = await buyer.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const open = indexedDB.open('ticket-mng');
+        open.onerror = () => resolve('could not open IndexedDB');
+        open.onsuccess = () => {
+          const db = open.result;
+          if (!db.objectStoreNames.contains('saved')) return resolve(null);
+          const get = db.transaction('saved').objectStore('saved').get('my-tickets');
+          get.onsuccess = () => resolve(get.result ?? null);
+          get.onerror = () => resolve('could not read IndexedDB');
+        };
+      }),
+  );
+  if (left !== null) throw new Error('saved tickets survived logout');
+  step('logging out deleted the tickets saved on the device');
 
   // ── the catalog: trending, category rows, a category grid, and on to an event's seat map ──
   const visitor = await newPage('visitor');
@@ -274,7 +341,7 @@ try {
   if (consoleErrors.length) throw new Error(`browser console errors:\n${consoleErrors.join('\n')}`);
   step('no browser console errors');
   console.log(
-    '\nE2E passed. Screenshots: .dev/e2e-watcher-held.png, .dev/e2e-buyer-tickets.png, .dev/e2e-watcher-sold.png',
+    '\nE2E passed. Screenshots: .dev/e2e-watcher-held.png, .dev/e2e-buyer-tickets.png, .dev/e2e-watcher-sold.png, .dev/e2e-my-tickets.png, .dev/e2e-offline-tickets.png',
   );
 } catch (err) {
   console.error('E2E FAILED:', err);

@@ -260,6 +260,20 @@ trending:                  events in live-events touched in the last 15 s, summe
 - "Sold in the last hour" is counted in Postgres from confirmed bookings (partial index on `(event_id, confirmed_at)`), and the page adds each seat it sees turn sold, so it moves the instant a sale lands.
 - Both numbers are best effort: without Redis, `viewers` is `null` and trending is empty, and pages work as before.
 
+## Tickets on the phone: offline, and in the calendar
+
+The door is where the signal is worst, so tickets have to open without one ([ADR 0014](adr/0014-offline-tickets.md)). Two stores, kept strictly apart:
+
+| Store                                                | Holds                                            | Cleared                                                   |
+| ---------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------- |
+| Service worker cache (`public/sw.js`, Cache Storage) | public files only: pages, scripts, styles, icons | old versions on each release                              |
+| Saved tickets (`public/offline-store.js`, IndexedDB) | the signed-in user's bookings and QR codes       | on logout, on login, and when the server ends the session |
+
+- **Network first.** Online, every page comes fresh from the server, so a release is live on the next load; offline (or after 4 s on a bad connection) the service worker serves the last saved copy. API requests bypass its cache entirely: personal data there would outlive the login and show up for the next person using the browser.
+- **Saving tickets.** My tickets saves the upcoming ones (confirmed, event not over yet) every time it loads, and the event page does the same right after a purchase. Offline, `session.offline` tells "can't reach the server" apart from "logged out": the page shows the saved copy under a banner (and the header says "Offline" rather than "Log in"), then reloads the live version when the connection returns.
+- **Why a saved QR code is enough.** It's a signed token, so a copy is as good as the original. Whether it was already used or refunded is checked by the scanner at the door, never by the picture.
+- **Calendar.** `GET /bookings/:id/calendar.ics` and the ticket email's attachment are the same RFC 5545 file (`src/lib/ical.ts`): UTC times, CRLF lines folded at 75 bytes, escaped text, a reminder 2 hours before. The UID is fixed per booking, so adding it twice updates one entry instead of duplicating it. My tickets also offers a Google Calendar link, built in the browser.
+
 ## Caching
 
 | Data                                                     | Layer                                                                                                    | Invalidation                                                                                                                               |
@@ -303,7 +317,8 @@ src/
   jobs/                       queues, the outbox relay, the job runner, handlers, schedules
   realtime/                   live seat-map hub (WebSockets + Redis pub/sub), viewer counts
   fake-gateway/               a Stripe-shaped payment provider for offline development
-public/                       the seat-map page and the password-reset page
+public/                       the website (catalog, event page, My tickets, account pages), with
+                              the service worker and manifest that make it an installable app
 scripts/                      seed, race test, load tests, e2e test, invariant check, cluster
 deploy/                       Nginx, monitoring, production compose, rollout
 test/unit, test/api           Vitest: unit and HTTP-level integration tests
