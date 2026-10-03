@@ -19,7 +19,17 @@ renderHeroSeats($('hero-seats'));
 bindPasswordToggle($('password'), $('toggle-password'));
 bindStrengthMeter($('password'), $('strength'));
 
-const next = nextPath();
+// /signup?role=organizer: an account for selling tickets, which starts on the dashboard.
+const asOrganizer = new URLSearchParams(location.search).get('role') === 'organizer';
+const next = nextPath(asOrganizer ? '/organizer' : '/');
+if (asOrganizer) {
+  document.title = 'Create an organizer account · Ticket MNG';
+  $('form-title').textContent = 'Create an organizer account';
+  $('form-sub').textContent =
+    'Sell tickets to your events: live seat maps, a door scanner and sales numbers.';
+  $('role-switch').hidden = true;
+  $('continue').querySelector('.btn-label').textContent = 'Go to your events';
+}
 $('login-link').href = withNext('/login', next);
 $('continue').href = next;
 $('name').focus();
@@ -44,7 +54,12 @@ $('form').addEventListener('submit', async (e) => {
 
   setBusy($('submit'), true);
   try {
-    const user = await authenticate('/auth/signup', { name, email, password });
+    const user = await authenticate('/auth/signup', {
+      name,
+      email,
+      password,
+      ...(asOrganizer ? { role: 'organizer' } : {}),
+    });
     showConfirmationStep(user.email);
   } catch (err) {
     setBusy($('submit'), false);

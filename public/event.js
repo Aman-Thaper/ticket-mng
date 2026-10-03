@@ -24,6 +24,7 @@ import {
 } from './format.js';
 import { mountHeader } from './header.js';
 import { refreshSavedTickets } from './saved-tickets.js';
+import { drawSeatGrid } from './seat-grid.js';
 import {
   api,
   describeError,
@@ -36,10 +37,6 @@ import {
 
 const $ = (id) => document.getElementById(id);
 const PENDING_SELECTION = 'ticket-mng:pending-selection';
-const SVG_NS = 'http://www.w3.org/2000/svg';
-const CELL = 18; // grid pitch in px
-const SEAT = 14; // seat size in px
-const LABEL_WIDTH = 90;
 const EVENT_ID = /^\/events\/([0-9a-f-]{36})\/?$/i.exec(location.pathname)?.[1] ?? null;
 
 const state = {
@@ -347,53 +344,23 @@ function mergeSnapshot(map) {
 // ─── rendering ─────────────────────────────────────────────────────────────────────────
 
 function renderMap(map) {
-  const svg = $('seat-map');
-  svg.replaceChildren();
   state.seats.clear();
-  let maxX = 0;
-  let maxY = 0;
-
-  for (const section of map.sections) {
-    const top = Math.min(...section.seats.map((s) => s.y));
-    const title = document.createElementNS(SVG_NS, 'text');
-    title.setAttribute('x', '0');
-    title.setAttribute('y', String(top * CELL + SEAT - 2));
-    title.setAttribute('class', 'section-label');
-    title.textContent = section.name;
-    svg.append(title);
-
-    for (const seat of section.seats) {
-      const rect = document.createElementNS(SVG_NS, 'rect');
-      rect.setAttribute('x', String(LABEL_WIDTH + seat.x * CELL));
-      rect.setAttribute('y', String(seat.y * CELL));
-      rect.setAttribute('width', String(SEAT));
-      rect.setAttribute('height', String(SEAT));
-      rect.setAttribute('rx', '3');
-      rect.setAttribute('tabindex', '0');
-      rect.setAttribute('role', 'button');
-      const label = `${section.name}, row ${seat.row}, seat ${seat.number}, ${money(seat.priceCents, map.currency)}`;
-      rect.setAttribute('aria-label', label);
-      rect.dataset.id = String(seat.id);
-      svg.append(rect);
-      state.seats.set(seat.id, {
-        seat,
-        section: section.name,
-        label,
-        status: seat.status,
-        version: seat.version,
-        el: rect,
-      });
-      paint(seat.id);
-      maxX = Math.max(maxX, seat.x);
-      maxY = Math.max(maxY, seat.y);
-    }
-  }
-
-  const width = LABEL_WIDTH + (maxX + 1) * CELL;
-  const height = (maxY + 1) * CELL;
-  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  svg.setAttribute('width', String(width));
-  svg.setAttribute('height', String(height));
+  drawSeatGrid($('seat-map'), map, (rect, seat, section) => {
+    rect.setAttribute('tabindex', '0');
+    rect.setAttribute('role', 'button');
+    const label = `${section.name}, row ${seat.row}, seat ${seat.number}, ${money(seat.priceCents, map.currency)}`;
+    rect.setAttribute('aria-label', label);
+    rect.dataset.id = String(seat.id);
+    state.seats.set(seat.id, {
+      seat,
+      section: section.name,
+      label,
+      status: seat.status,
+      version: seat.version,
+      el: rect,
+    });
+    paint(seat.id);
+  });
   if (!map.sections.length)
     showMessage('This event has no seat inventory (the seed only stocks the next 1,000 shows).');
   updateCounts();

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#18181b" media="(prefers-color-scheme: dark)" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <title>Event dashboard · Ticket MNG</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/site.css" />
+    <link rel="stylesheet" href="/organizer.css" />
+    <script type="module" src="/organizer-event.js"></script>
+  </head>
+  <body>
+    <header id="site-header"></header>
+
+    <main class="page organizer-page">
+      <a class="back-dark" href="/organizer">← Your events</a>
+      <div class="dash-head">
+        <div>
+          <span id="status" class="status-pill"></span>
+          <h1 id="title">Loading…</h1>
+          <p id="when" class="muted"></p>
+        </div>
+        <div class="dash-actions">
+          <a id="view-page" class="button secondary">View the page</a>
+          <a id="open-scanner" class="button secondary" hidden>Open the door scanner</a>
+          <button id="publish" type="button" hidden>Publish</button>
+          <button id="cancel-event" type="button" class="danger-outline" hidden>Cancel the event</button>
+        </div>
+      </div>
+      <p id="notice" class="message" role="alert"></p>
+
+      <div id="cancel-confirm" class="confirm-box" hidden>
+        <p>
+          Cancel this event? Every buyer is refunded in full and told by email, and it leaves the catalog.
+          This can't be undone.
+        </p>
+        <button id="confirm-cancel" type="button" class="danger">Yes, cancel it</button>
+        <button id="keep-event" type="button" class="secondary">Keep it</button>
+      </div>
+
+      <section class="stat-cards" aria-label="Headline numbers">
+        <div class="stat-card">
+          <span class="stat-label">Sold</span>
+          <strong id="stat-sold">–</strong>
+          <span id="stat-sold-sub" class="muted"></span>
+          <div class="meter"><span id="sold-meter"></span></div>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Revenue</span>
+          <strong id="stat-revenue">–</strong>
+          <span id="stat-revenue-sub" class="muted"></span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">In carts now</span>
+          <strong id="stat-held">–</strong>
+          <span class="muted">seats on hold, unpaid</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Checked in</span>
+          <strong id="stat-checked">–</strong>
+          <span id="stat-checked-sub" class="muted"></span>
+        </div>
+      </section>
+
+      <section class="block">
+        <div class="block-head">
+          <h2>Ticket sales</h2>
+          <div class="segmented" role="group" aria-label="Bars per">
+            <button type="button" data-bucket="5m">5 min</button>
+            <button type="button" data-bucket="1h" aria-pressed="true">Hour</button>
+            <button type="button" data-bucket="1d">Day</button>
+          </div>
+        </div>
+        <svg id="chart" class="chart" role="img" aria-label="Tickets sold over time"></svg>
+      </section>
+
+      <section class="block">
+        <div class="block-head">
+          <h2>Seats, live</h2>
+          <div class="legend" aria-hidden="true">
+            <span><i class="dot available"></i>available</span>
+            <span><i class="dot held"></i>in a cart</span>
+            <span><i class="dot booked"></i>sold</span>
+          </div>
+        </div>
+        <div class="map-scroll"><svg id="seat-map" role="img" aria-label="Seat map"></svg></div>
+      </section>
+
+      <section class="block">
+        <div class="block-head">
+          <h2>Attendees</h2>
+          <div class="attendee-tools">
+            <input
+              id="attendee-q"
+              type="search"
+              placeholder="Search name or email"
+              aria-label="Search attendees"
+            />
+            <button id="download-csv" type="button" class="secondary">Download CSV</button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="attendees">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Seat</th>
+                <th>Bought</th>
+                <th>Checked in</th>
+              </tr>
+            </thead>
+            <tbody id="attendee-rows"></tbody>
+          </table>
+        </div>
+        <p id="attendee-empty" class="muted" hidden>No attendees yet.</p>
+        <button id="more-attendees" type="button" class="secondary more" hidden>Load more</button>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <span>© Ticket MNG</span>
+      <a href="/">Events</a>
+      <a href="/docs">API</a>
+    </footer>
+  </body>
+</html>

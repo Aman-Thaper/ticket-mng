@@ -117,8 +117,8 @@
             >Ticket MNG</a
           >
           <section id="form-view">
-            <h1>Create your account</h1>
-            <p class="sub">Book seats in seconds. Your tickets arrive by email.</p>
+            <h1 id="form-title">Create your account</h1>
+            <p class="sub" id="form-sub">Book seats in seconds. Your tickets arrive by email.</p>
             <div id="alert" class="alert" role="alert" hidden></div>
             <form id="form" novalidate>
               <div class="field">
@@ -186,6 +186,9 @@
               </p>
             </form>
             <p class="switch">Already have an account? <a id="login-link" href="/login">Log in</a></p>
+            <p class="switch" id="role-switch">
+              Selling tickets? <a href="/signup?role=organizer">Create an organizer account</a>
+            </p>
           </section>
           <section id="done-view" class="state" hidden>
             <div class="icon">

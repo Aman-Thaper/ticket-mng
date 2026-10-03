@@ -26,6 +26,7 @@ import { authRoutes } from './modules/auth/routes.js';
 import { bookingRoutes } from './modules/bookings/routes.js';
 import type { BookingOptions } from './modules/bookings/service.js';
 import { healthRoutes } from './modules/health/routes.js';
+import { organizerRoutes } from './modules/organizer/routes.js';
 import { userRoutes } from './modules/users/routes.js';
 import { venueRoutes } from './modules/venues/routes.js';
 import { eventRoutes } from './modules/events/routes.js';
@@ -68,6 +69,7 @@ const PAGES = [
   'verify-email',
   'my-tickets',
   'scan',
+  'organizer',
 ] as const;
 
 const STATIC_CSP = [
@@ -75,7 +77,8 @@ const STATIC_CSP = [
   "script-src 'self'",
   "style-src 'self'",
   `img-src 'self' data: ${config.S3_PUBLIC_URL}`,
-  "connect-src 'self'",
+  // Poster uploads go from the browser straight to object storage (a presigned POST).
+  `connect-src 'self' ${new URL(config.S3_PUBLIC_URL).origin}`,
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -177,6 +180,7 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
         { name: 'bookings', description: 'Seat holds and bookings' },
         { name: 'payments', description: 'Payments, refunds and provider webhooks' },
         { name: 'tickets', description: 'QR tickets and check-in' },
+        { name: 'organizer', description: "The organizer dashboard: your events' numbers and attendees" },
         { name: 'venues', description: 'Venues and their seat layouts' },
         { name: 'users', description: 'Profiles and roles' },
         { name: 'admin', description: 'Queues and dead letters (admin)' },
@@ -216,6 +220,12 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
     app.get(`/${page}`, { schema: { hide: true } }, (_req, reply) => reply.sendFile(`${page}.html`));
   }
   app.get('/events/:id', { schema: { hide: true } }, (_req, reply) => reply.sendFile('event.html'));
+  app.get('/organizer/events/new', { schema: { hide: true } }, (_req, reply) =>
+    reply.sendFile('organizer-new.html'),
+  );
+  app.get('/organizer/events/:id', { schema: { hide: true } }, (_req, reply) =>
+    reply.sendFile('organizer-event.html'),
+  );
 
   await app.register(healthRoutes);
   // The simulated payment provider's browser API (dev and test only; refused in production).
@@ -230,6 +240,7 @@ export async function buildApp(opts: FastifyServerOptions = {}, overrides: AppOv
       await api.register(bookingRoutes);
       await api.register(paymentRoutes);
       await api.register(ticketRoutes);
+      await api.register(organizerRoutes);
       await api.register(adminRoutes);
     },
     { prefix: '/api/v1' },

@@ -14,6 +14,7 @@ const TEMPLATE = `
   <nav class="main-nav" aria-label="Main">
     <a href="/" data-nav="events">Events</a>
     <a href="/my-tickets" data-nav="tickets">My tickets</a>
+    <a id="organizer-nav" href="/organizer" data-nav="organizer" hidden>Organizer</a>
   </nav>
   <div class="account">
     <div id="guest" class="guest">
@@ -141,6 +142,7 @@ export function mountHeader({ active, onLogout } = {}) {
     const offline = !user && session.offline;
     $('guest').hidden = Boolean(user) || offline;
     $('offline-pill').hidden = !offline;
+    $('organizer-nav').hidden = !user || user.role === 'attendee';
     $('user-menu').hidden = !user;
     if (user) {
       $('avatar').textContent = initials(user.name);

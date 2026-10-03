@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#18181b" media="(prefers-color-scheme: dark)" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <title>Create an event · Ticket MNG</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/site.css" />
+    <link rel="stylesheet" href="/organizer.css" />
+    <script type="module" src="/organizer-new.js"></script>
+  </head>
+  <body>
+    <header id="site-header"></header>
+
+    <main class="page wizard">
+      <a class="back-dark" href="/organizer">← Your events</a>
+      <h1>Create an event</h1>
+      <ol class="steps" id="steps">
+        <li data-step="1">Venue</li>
+        <li data-step="2">Details</li>
+        <li data-step="3">Prices</li>
+        <li data-step="4">Poster</li>
+        <li data-step="5">Review</li>
+      </ol>
+      <p id="notice" class="message" role="alert"></p>
+
+      <!-- 1. Venue -->
+      <form id="step-1" class="step-panel" novalidate>
+        <h2>Where is it?</h2>
+        <p class="muted">Pick a venue, or add yours. A venue's seat layout can't change later.</p>
+        <label class="field">
+          Search venues
+          <input id="venue-q" type="search" placeholder="Name, e.g. Arena" autocomplete="off" />
+          <span class="hint">Showing a few; type to find yours.</span>
+        </label>
+        <div id="venue-list" class="venue-list" role="radiogroup" aria-label="Venues"></div>
+
+        <details id="new-venue" class="new-venue">
+          <summary>Add a new venue</summary>
+          <div class="fields-2 spaced">
+            <label class="field">Name <input id="v-name" maxlength="200" /></label>
+            <label class="field">Address <input id="v-address" maxlength="300" /></label>
+            <label class="field">City <input id="v-city" maxlength="100" /></label>
+            <label class="field">
+              Country
+              <input id="v-country" maxlength="2" placeholder="US" autocapitalize="characters" />
+              <span class="hint">Two-letter code: US, GB, DE, IN, …</span>
+            </label>
+            <label class="field">
+              Time zone
+              <input id="v-timezone" list="timezones" />
+              <span class="hint">Event times at this venue are local to it.</span>
+            </label>
+          </div>
+          <datalist id="timezones"></datalist>
+          <h3>Sections</h3>
+          <p class="muted">From the stage back. Each section is a block of rows.</p>
+          <div id="sections"></div>
+          <button type="button" id="add-section" class="secondary">Add a section</button>
+          <p id="capacity" class="muted"></p>
+          <div class="step-actions">
+            <button type="button" id="create-venue">Create this venue</button>
+          </div>
+        </details>
+
+        <div class="step-actions">
+          <button type="submit">Next: details</button>
+        </div>
+      </form>
+
+      <!-- 2. Details -->
+      <form id="step-2" class="step-panel" novalidate hidden>
+        <h2>What and when?</h2>
+        <p class="muted" id="tz-note"></p>
+        <div class="fields">
+          <label class="field">Title <input id="e-title" maxlength="200" /></label>
+          <label class="field"
+            >Category
+            <select id="e-category"></select
+          ></label>
+          <label class="field">
+            Description
+            <textarea id="e-description" maxlength="5000" rows="4"></textarea>
+          </label>
+          <div class="fields-2">
+            <label class="field">Doors open <input id="e-starts" type="datetime-local" /></label>
+            <label class="field">Ends <input id="e-ends" type="datetime-local" /></label>
+          </div>
+          <div class="fields-2">
+            <label class="field">
+              Tickets on sale from
+              <input id="e-sales" type="datetime-local" />
+              <span class="hint">Leave empty to sell as soon as you publish.</span>
+            </label>
+            <label class="field">
+              Tickets per buyer, at most
+              <input id="e-max" type="number" min="1" max="50" value="10" />
+            </label>
+          </div>
+        </div>
+        <div class="step-actions">
+          <button type="button" class="secondary" data-back="1">Back</button>
+          <button type="submit">Next: prices</button>
+        </div>
+      </form>
+
+      <!-- 3. Prices -->
+      <form id="step-3" class="step-panel" novalidate hidden>
+        <h2>Prices</h2>
+        <p class="muted">One price per section.</p>
+        <div class="fields">
+          <label class="field">
+            Currency
+            <select id="e-currency">
+              <option>USD</option>
+              <option>EUR</option>
+              <option>GBP</option>
+              <option>INR</option>
+              <option>CAD</option>
+              <option>AUD</option>
+            </select>
+          </label>
+          <div id="prices" class="fields-2"></div>
+        </div>
+        <div class="step-actions">
+          <button type="button" class="secondary" data-back="2">Back</button>
+          <button type="submit" id="create-draft">Save as a draft and continue</button>
+        </div>
+      </form>
+
+      <!-- 4. Poster -->
+      <form id="step-4" class="step-panel" novalidate hidden>
+        <h2>A poster</h2>
+        <p class="muted">Optional. JPEG, PNG or WebP, up to 10 MB. It's resized for every screen.</p>
+        <label class="field">Image <input id="poster-file" type="file" accept="image/*" /></label>
+        <p id="poster-status" class="muted" role="status"></p>
+        <img id="poster-preview" class="poster-preview" alt="" hidden />
+        <div class="step-actions">
+          <button type="submit" id="upload-poster">Upload</button>
+          <button type="button" class="secondary" id="skip-poster">Skip</button>
+        </div>
+      </form>
+
+      <!-- 5. Review -->
+      <section id="step-5" class="step-panel" hidden>
+        <h2>Ready to go?</h2>
+        <p class="muted">The event is saved as a draft. Publish it to put it in the catalog.</p>
+        <dl id="review" class="review"></dl>
+        <div class="step-actions">
+          <button type="button" id="publish">Publish now</button>
+          <a id="keep-draft" class="button secondary">Keep it as a draft</a>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <span>© Ticket MNG</span>
+      <a href="/">Events</a>
+      <a href="/docs">API</a>
+    </footer>
+  </body>
+</html>

@@ -11,8 +11,10 @@
  * over the WebSocket, without reloading, along with "2 sold in the last hour" and the
  * viewer count. The catalog must then list the event under "Trending now". My tickets must
  * download a calendar file, and reopen with its QR codes with the network off. Finally the
- * organizer works the door: scans the buyer's QR codes (photos), with a repeat caught on the
- * device, a second door told "already used", and an offline admission that syncs later.
+ * organizer works the door: scans the buyer's QR codes (camera and photos), with a repeat
+ * caught on the device, a second door told "already used", and an offline admission that
+ * syncs later. Then the organizer's dashboard (numbers, chart, live seat map, attendees, CSV),
+ * and a new event created step by step in the browser, published, and found in the catalog.
  * Screenshots go to .dev/e2e-*.png.
  * Needs the API, the worker (it sends email and confirms payments) and Mailpit.
  */
@@ -131,6 +133,8 @@ await sql`
 const browser = await chromium.launch();
 /** Launched at the door: a browser whose camera shows a ticket (a video file stands in for it). */
 let cameraBrowser: Browser | undefined;
+/** The event the organizer creates in the browser, taken off the catalog again at the end. */
+let createdEventId: string | undefined;
 const consoleErrors: string[] = [];
 /** While the test has a browser offline on purpose, its failed requests are expected. */
 let offlineOnPurpose = false;
@@ -433,10 +437,73 @@ try {
   await door.waitForTimeout(500); // the progress bar animates
   await door.screenshot({ path: '.dev/e2e-door.png', fullPage: true });
 
+  // ── the organizer's dashboard ──
+  const office = await newPage('office');
+  await office.goto(`${BASE}/login?next=${encodeURIComponent('/organizer')}`);
+  await office.locator('#email').fill(organizerEmail);
+  await office.locator('#password').fill(organizerPassword);
+  await office.locator('#submit').click();
+  const listed = office.locator(`.org-event[href="/organizer/events/${event.id}"]`);
+  await listed.waitFor();
+  step(
+    `organizer: "Your events" lists the show, "${await listed.locator('.numbers span').first().textContent()}"`,
+  );
+  await listed.click();
+  await office.locator('#stat-sold', { hasText: /^2$/ }).waitFor();
+  await office.locator('#stat-revenue', { hasText: '$150' }).waitFor();
+  await office.locator('#stat-checked', { hasText: /^2$/ }).waitFor();
+  await office.locator('#chart .chart-bar').first().waitFor();
+  await office.locator('#seat-map rect.seat.booked').nth(1).waitFor();
+  await office.locator('#attendee-rows tr').nth(1).waitFor();
+  step('dashboard: 2 sold, $150, 2 checked in; a sales bar, sold seats on the live map, 2 attendees');
+  const [csv] = await Promise.all([office.waitForEvent('download'), office.locator('#download-csv').click()]);
+  const csvRows = (await readFile(await csv.path(), 'utf8')).trim().split('\r\n');
+  if (csvRows.length !== 3 || !csvRows[1]!.includes('E2E Buyer'))
+    throw new Error(`unexpected CSV:\n${csvRows.join('\n')}`);
+  step(`"Download CSV" saves ${csv.suggestedFilename()}: a header and 2 attendees`);
+  await office.evaluate(() => window.scrollTo(0, 0)); // the sticky header belongs at the top
+  await office.waitForTimeout(500); // the meters animate
+  await office.screenshot({ path: '.dev/e2e-dashboard.png', fullPage: true });
+
+  // ── a new event, created step by step ──
+  const poster = await sharp({ create: { width: 900, height: 1200, channels: 3, background: '#7c3aed' } })
+    .png()
+    .toBuffer();
+  await writeFile('.dev/e2e-poster.png', poster);
+  const createdTitle = `E2E Browserfest ${tag}`;
+  await office.goto(`${BASE}/organizer/events/new`);
+  await office.locator('#new-venue summary').click();
+  await office.locator('#v-name').fill(`${tag} Hall`);
+  await office.locator('#v-address').fill('2 Test Ave');
+  await office.locator('#v-city').fill('Testville');
+  await office.locator('#v-country').fill('US');
+  await office.locator('#v-timezone').fill('America/New_York');
+  await office.locator('#create-venue').click();
+  await office.locator('.venue-option input:checked').waitFor();
+  await office.locator('#step-1 button[type="submit"]').click();
+  await office.locator('#e-title').fill(createdTitle);
+  await office.locator('#step-2 button[type="submit"]').click();
+  await office.locator('#create-draft').click();
+  await office.locator('#poster-file').setInputFiles('.dev/e2e-poster.png');
+  await office.locator('#upload-poster').click();
+  await office.locator('#poster-status', { hasText: 'Poster ready' }).waitFor({ timeout: 30_000 });
+  await office.locator('#review dd', { hasText: createdTitle }).waitFor();
+  step('wizard: a new venue (2 sections), times in its zone, prices, a poster uploaded straight to storage');
+  await office.locator('#publish').click();
+  await office.waitForURL(/\/organizer\/events\/[0-9a-f-]{36}\?published=1$/);
+  createdEventId = /events\/([0-9a-f-]{36})/.exec(office.url())![1];
+  await office.locator('#status', { hasText: 'On sale' }).waitFor();
+  await office.locator('#seat-map rect.seat.available').first().waitFor();
+  step(`published: its dashboard is live (${await office.locator('#stat-sold-sub').textContent()})`);
+
+  await visitor.goto(`${BASE}/?q=Browserfest`);
+  await visitor.locator(`.card[href="/events/${createdEventId}"] .card-poster`).waitFor();
+  step('catalog: a search finds the new event, with its poster');
+
   if (consoleErrors.length) throw new Error(`browser console errors:\n${consoleErrors.join('\n')}`);
   step('no browser console errors');
   console.log(
-    '\nE2E passed. Screenshots: .dev/e2e-watcher-held.png, .dev/e2e-buyer-tickets.png, .dev/e2e-watcher-sold.png, .dev/e2e-my-tickets.png, .dev/e2e-offline-tickets.png, .dev/e2e-door.png',
+    '\nE2E passed. Screenshots: .dev/e2e-watcher-held.png, .dev/e2e-buyer-tickets.png, .dev/e2e-watcher-sold.png, .dev/e2e-my-tickets.png, .dev/e2e-offline-tickets.png, .dev/e2e-door.png, .dev/e2e-dashboard.png',
   );
 } catch (err) {
   console.error('E2E FAILED:', err);
@@ -445,5 +512,8 @@ try {
   await Promise.all([browser.close(), cameraBrowser?.close()]);
   // Take the test event off the public catalog (its bookings stay, for inspection).
   await db.updateTable('events').set({ status: 'draft' }).where('id', '=', event.id).execute();
+  if (createdEventId) {
+    await db.updateTable('events').set({ status: 'draft' }).where('id', '=', createdEventId).execute();
+  }
   await Promise.all([db.destroy(), redis.quit()]);
 }

@@ -242,14 +242,31 @@ A scanner can verify a ticket with the public key alone, offline, and forging on
 5. `src/fake-gateway/`: a provider you can make misbehave.
 6. `src/lib/invariants.ts`: the rules money must obey.
 7. [ADR 0005](adr/0005-payments-reconcile.md).
+8. The organizer's numbers: `src/modules/organizer/queries.ts` (revenue, sales over time) and `routes.ts` (attendees, the CSV export); `src/lib/csv.ts`.
 
 **Try:**
 
 - `FAKE_GATEWAY_CHAOS=true`: every webhook is delivered twice, late and out of order. Buy tickets; bookings still end right. Then `npm run check:invariants`.
 - Hold, start paying, let the hold lapse, sell the seat to someone else, then complete the first payment: automatic refund.
 - Send the same `POST /events/:id/bookings` twice with the same `Idempotency-Key`.
+- Sign up at `/signup?role=organizer`, create an event at `/organizer/events/new` (a new venue, a poster), publish it, buy a ticket for it in another browser, and watch its dashboard: the seat turns held, then sold, and the numbers follow. Refund it and watch revenue drop.
 
 **Questions:**
+
+<details><summary>The dashboard's revenue is "payments charged minus refunds paid", not "confirmed bookings × price". Why?</summary>
+
+Money moves through payments, and the awkward cases live there. A buyer charged twice for one booking (two tabs, a retried payment) is refunded the duplicate: payments count both charges and the refund, netting to one sale. A payment that lands after its hold lapsed, for seats someone else bought, is refunded in full: it nets to zero. Counting bookings would need special cases for each, and could drift from what the bank actually holds.
+</details>
+
+<details><summary>What is CSV injection, and why does a ticketing app need to care?</summary>
+
+Spreadsheets run a cell that starts with `=`, `+`, `-` or `@` as a formula. Buyers type their own names, so a name like `=HYPERLINK("https://evil.example","Click")` becomes a live link, or worse, when the organizer opens the attendee export. `src/lib/csv.ts` prefixes such cells with an apostrophe, which spreadsheets show as plain text, on top of the usual quoting for commas, quotes and line breaks.
+</details>
+
+<details><summary>An organizer in Toronto creates a show in Tokyo for "7:30 PM". How does the browser store the right instant?</summary>
+
+The time is meant on Tokyo's clocks, but browsers only convert to and from their own zone. `zonedTimeToUtc` reads "7:30 PM" as if it were UTC, asks `Intl` what Tokyo's clocks show at that instant, and shifts by the difference; a second pass settles days when the clocks change (DST). The API then stores a UTC instant, and every page shows it in the venue's zone again.
+</details>
 
 <details><summary>Why fetch the payment's state from the provider instead of using the webhook body?</summary>
 

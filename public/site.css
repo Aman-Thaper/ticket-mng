@@ -32,9 +32,23 @@ main {
   color: var(--text);
 }
 
+/* Links that act as buttons look like the <button>s next to them. */
+a.button {
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+a.button.secondary {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--border);
+}
+
 .button,
 .see-all,
 .load-more {
+  text-decoration: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;

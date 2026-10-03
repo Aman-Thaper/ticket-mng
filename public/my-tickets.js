@@ -4,7 +4,7 @@
 // It works offline: each load saves the upcoming tickets on this device (saved-tickets.js),
 // and without a connection the page shows that saved copy, QR codes and all. Upcoming
 // events can also be added to a calendar (.ics file, or Google Calendar).
-import { money, when } from './format.js';
+import { money, slug, when } from './format.js';
 import { mountHeader } from './header.js';
 import { clearSavedTickets, loadSavedTickets } from './offline-store.js';
 import { fetchAndSaveTickets, fetchBookings, isUpcoming } from './saved-tickets.js';
@@ -205,16 +205,6 @@ function googleCalendarUrl(b) {
   });
   return `https://calendar.google.com/calendar/render?${params}`;
 }
-
-/** Same file name as the server gives it: "Hamlet: The Musical!" → "hamlet-the-musical". */
-const slug = (title) =>
-  title
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60) || 'event';
 
 function qrTicket(t) {
   const box = el('div', 'qr-ticket');

@@ -40,6 +40,7 @@ const PRECACHE = [
   '/vendor/jsQR.js',
   '/reset-password.js',
   '/saved-tickets.js',
+  '/seat-grid.js',
   '/session.js',
   '/signup.js',
   '/verify-email.js',

@@ -302,6 +302,17 @@ sequenceDiagram
 - **Attendance by polling.** `GET /events/:id/attendance` (sold, checked in, the last 10 scans) is polled every 3 s by each scanner. A handful of organizer screens don't justify authenticated WebSockets; a 1 s micro-cache and ETags keep polling cheap, and the partial index `tickets (event_id, checked_in_at DESC)` serves the latest scans. Each scanner shows its own check-ins at once, without waiting for the next poll.
 - **Camera fallbacks.** Cameras need HTTPS. Without one (or a camera), staff can upload a photo or type the code. jsQR is served from `public/vendor/` because the CSP allows our own scripts only.
 
+## The organizer's side
+
+`/organizer` lists an organizer's events with their numbers; `/organizer/events/new` creates one step by step; `/organizer/events/:id` is its dashboard (`src/modules/organizer/`, `public/organizer*.js`).
+
+- **Revenue is money kept: payments charged minus refunds paid out**, not "confirmed bookings × price". Counting payments gets the awkward cases right with no special handling: a duplicate charge that was refunded nets to zero, and so does a late payment for seats that were already gone. (It's the same rule `npm run check:invariants` audits: no money kept for nothing.)
+- **Every number is one grouped query** over an index that already exists: seats per event, bookings by `(event_id, status)`, check-ins by event, and sales over time from the partial index `bookings (event_id, confirmed_at) WHERE status = 'confirmed'`. Sales are bucketed with `date_bin` (5 minutes) or `date_trunc(…, venue time zone)` (hours, days), so "Tuesday" is Tuesday where the show is. Each bucket size looks back a bounded window, so a chart never has thousands of bars.
+- **Attendees** are one row per valid ticket (a refunded ticket isn't an attendee), keyset-paged on `(name, ticket id)`. The CSV export streams them 1,000 at a time, and escapes cells for spreadsheets: a value starting with `= + - @` gets a leading apostrophe, because buyers type their own names and `=HYPERLINK(…)` would otherwise run as a formula on the organizer's machine (CSV injection).
+- **Times are typed in the venue's zone.** "7:30 PM" in the wizard means 7:30 PM on the venue's clocks, wherever the organizer sits. Browsers only convert to their own zone, so `zonedTimeToUtc` in `public/format.js` does it with `Intl` (read the time as UTC, see what the venue's clocks show then, correct, and repeat once for days when the clocks change).
+- **Posters go straight to object storage.** The wizard asks for a presigned POST, the browser uploads the file to MinIO/S3 directly (the CSP's `connect-src` allows that one origin), and a worker resizes it. The API never handles the file's bytes.
+- The dashboard's seat map is the buyers' map (`public/seat-grid.js`, shared with the event page), fed by the same WebSocket, so the organizer watches seats go into carts and sell in real time.
+
 ## Caching
 
 | Data                                                     | Layer                                                                                                    | Invalidation                                                                                                                               |

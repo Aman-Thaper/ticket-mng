@@ -134,3 +134,58 @@ export function liveText(live) {
   if (live?.soldLastHour > 0) parts.push(`${count(live.soldLastHour)} sold in the last hour`);
   return parts.join(' · ');
 }
+
+// ─── wall-clock times in another zone ────────────────────────────────────────────────────
+// Organizers type event times as the venue's clocks show them ("7:30 PM in Tokyo"), wherever
+// they sit. Browsers only convert to and from their own zone, so these two do it by hand.
+
+/** What the clocks in `timeZone` show at `instant`, as { year, month, day, hour, minute, second }. */
+function wallClock(instant, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(instant));
+  return Object.fromEntries(parts.filter((p) => p.type !== 'literal').map((p) => [p.type, Number(p.value)]));
+}
+
+/**
+ * "2026-10-09T19:30" on the clocks of `timeZone` → that instant, as an ISO string. Read the
+ * wall time as if it were UTC, see what the zone's clocks show at that instant, and shift by
+ * the difference; a second pass settles the days when the clocks change.
+ */
+export function zonedTimeToUtc(local, timeZone) {
+  const [date, time = '00:00'] = local.split('T');
+  const [year, month, day] = date.split('-').map(Number);
+  const [hour, minute] = time.split(':').map(Number);
+  const target = Date.UTC(year, month - 1, day, hour, minute);
+  let instant = target;
+  for (let i = 0; i < 2; i++) {
+    const c = wallClock(instant, timeZone);
+    const shown = Date.UTC(c.year, c.month - 1, c.day, c.hour, c.minute, c.second);
+    instant += target - shown;
+  }
+  return new Date(instant).toISOString();
+}
+
+/** An instant → "2026-10-09T19:30" on the clocks of `timeZone` (for <input type="datetime-local">). */
+export function utcToZonedInput(iso, timeZone) {
+  const c = wallClock(Date.parse(iso), timeZone);
+  const two = (n) => String(n).padStart(2, '0');
+  return `${c.year}-${two(c.month)}-${two(c.day)}T${two(c.hour)}:${two(c.minute)}`;
+}
+
+/** "Hamlet: The Musical!" → "hamlet-the-musical": a file name (the server names files the same way). */
+export const slug = (title) =>
+  title
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'event';
